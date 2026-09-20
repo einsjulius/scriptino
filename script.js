@@ -12,6 +12,7 @@ const KEY_INDEX = "scriptino_index_v1";
 const KEY_SCRIPT_PREFIX = "scriptino_script_v1_";
 const KEY_SETTINGS = "scriptino_settings_v1";
 const KEY_SEEDED = "scriptino_seeded_v1";
+const KEY_ZOOM = "scriptino_zoom_v1";
 
 const TYPE_ORDER = ["sceneheading","action","character","dialogue","parenthetical","transition","shot"];
 
@@ -176,6 +177,7 @@ const Storage = {
       const idx = this.loadIndex();
       const entry = {
         id: script.id, title: script.title || "Unbenanntes Skript",
+        author: script.author || "",
         updatedAt: script.updatedAt, createdAt: script.createdAt,
         pages: pageCount || 1
       };
@@ -248,8 +250,20 @@ const App = {
   currentPageCount: 1,
   focusMode: false,
   history: { stack: [], index: -1 },
-  activeCardMenuId: null
+  activeCardMenuId: null,
+  zoom: loadZoom()
 };
+
+function loadZoom(){
+  try{
+    const v = parseInt(localStorage.getItem(KEY_ZOOM), 10);
+    if(!isNaN(v) && v >= 50 && v <= 200) return v;
+  }catch(e){ /* ignore */ }
+  return 100;
+}
+function saveZoom(v){
+  try{ localStorage.setItem(KEY_ZOOM, String(v)); }catch(e){ /* ignore */ }
+}
 
 /* --------------------------------------------------------------------
    5. ROUTER
@@ -296,17 +310,26 @@ function renderLibrary(){
     card.dataset.id = entry.id;
     card.innerHTML = `
       <div class="script-card-top">
-        <h3 class="script-card-title"></h3>
+        <div>
+          <h3 class="script-card-title"></h3>
+          <span class="script-card-tag">Drehbuch</span>
+          <p class="script-card-author" hidden></p>
+        </div>
         <button class="icon-btn script-card-menu-btn" type="button" title="Optionen" aria-label="Optionen">
           <i data-lucide="more-vertical"></i>
         </button>
       </div>
       <div class="script-card-meta">
-        <p class="script-card-edited"></p>
         <p class="script-card-pages"></p>
+        <p class="script-card-edited"></p>
       </div>
     `;
     card.querySelector(".script-card-title").textContent = entry.title || "Unbenanntes Skript";
+    if(entry.author){
+      const authorEl = card.querySelector(".script-card-author");
+      authorEl.textContent = entry.author;
+      authorEl.hidden = false;
+    }
     card.querySelector(".script-card-edited").textContent = "Zuletzt bearbeitet — " + formatDateShort(entry.updatedAt);
     card.querySelector(".script-card-pages").textContent = (entry.pages || 1) + (entry.pages === 1 ? " Seite" : " Seiten");
 
@@ -569,6 +592,27 @@ function restoreCaret(caret){
   if(node){ node.focus(); setCaretOffset(node, caret.offset); }
 }
 
+function getCaretRect(node){
+  const sel = window.getSelection();
+  if(!sel || sel.rangeCount === 0) return null;
+  const range = sel.getRangeAt(0).cloneRange();
+  range.collapse(true);
+  let rect = range.getClientRects()[0];
+  if(!rect || (rect.width === 0 && rect.height === 0)) rect = range.getBoundingClientRect();
+  if(!rect) return null;
+  return { top: rect.top, bottom: rect.bottom };
+}
+function focusElementAt(index, where){
+  const els = elementsArr();
+  if(index < 0 || index >= els.length) return;
+  const target = els[index];
+  const node = $(`#pagesContainer .el[data-id="${target.id}"]`);
+  if(!node) return;
+  node.focus();
+  const len = stripToPlainText(target.html).length;
+  setCaretOffset(node, where === "end" ? len : 0);
+}
+
 /* --------------------------------------------------------------------
    12. ELEMENT LOOKUP / MUTATION HELPERS
    -------------------------------------------------------------------- */
@@ -728,6 +772,7 @@ function renderPages(pageGroups, m, caret){
   refreshIcons();
   applyResponsiveScale();
   if(caret) restoreCaret(caret);
+  repositionCharSuggest();
 }
 
 function wrapInScaleContainer(pageNode){
@@ -745,16 +790,56 @@ function applyResponsiveScale(){
   const nativeW = firstPage.offsetWidth;
   const nativeH = firstPage.offsetHeight;
   if(available <= 0 || !nativeW) return;
-  const scale = Math.max(0.1, Math.min(1, available / nativeW));
+  const fitScale = Math.max(0.1, Math.min(1, available / nativeW));
+  const userZoom = (App.zoom || 100) / 100;
+  const scale = fitScale * userZoom;
   $all(".page-scale-wrap").forEach(wrap => {
     const page = wrap.querySelector(".page");
     wrap.style.width = Math.round(nativeW * scale) + "px";
     wrap.style.height = Math.round(nativeH * scale) + "px";
-    page.style.transform = scale < 1 ? `scale(${scale})` : "none";
+    page.style.transform = scale !== 1 ? `scale(${scale})` : "none";
     page.style.transformOrigin = "top left";
   });
+  updateZoomLabel();
 }
 window.addEventListener("resize", debounce(applyResponsiveScale, 150));
+
+/* --------------------------------------------------------------------
+   13b. DOCUMENT ZOOM (nur die Seite, nicht die UI)
+   -------------------------------------------------------------------- */
+function setZoom(newZoom){
+  const clamped = Math.max(50, Math.min(200, Math.round(newZoom / 10) * 10));
+  App.zoom = clamped;
+  saveZoom(clamped);
+  applyResponsiveScale();
+}
+function zoomIn(){ setZoom((App.zoom || 100) + 10); }
+function zoomOut(){ setZoom((App.zoom || 100) - 10); }
+function zoomReset(){ setZoom(100); }
+function updateZoomLabel(){
+  const label = $("#btnZoomReset");
+  if(label) label.textContent = (App.zoom || 100) + "%";
+  const outBtn = $("#btnZoomOut");
+  const inBtn = $("#btnZoomIn");
+  if(outBtn) outBtn.disabled = (App.zoom || 100) <= 50;
+  if(inBtn) inBtn.disabled = (App.zoom || 100) >= 200;
+}
+const btnZoomIn = $("#btnZoomIn");
+const btnZoomOut = $("#btnZoomOut");
+const btnZoomReset = $("#btnZoomReset");
+if(btnZoomIn) btnZoomIn.addEventListener("click", zoomIn);
+if(btnZoomOut) btnZoomOut.addEventListener("click", zoomOut);
+if(btnZoomReset) btnZoomReset.addEventListener("click", zoomReset);
+
+const editorStageEl = $("#editorStage");
+if(editorStageEl){
+  editorStageEl.addEventListener("wheel", (e) => {
+    if(!(e.ctrlKey || e.metaKey)) return;
+    e.preventDefault();
+    if(e.deltaY < 0) zoomIn();
+    else if(e.deltaY > 0) zoomOut();
+  }, { passive:false });
+}
 
 function repaginate(immediate){
   if(!App.currentScript) return;
@@ -824,16 +909,146 @@ function applySnapshot(snap){
   repaginate(true);
   scheduleAutosave();
 }
+function captureScrollPos(){
+  const stage = $("#editorStage");
+  return {
+    winX: window.scrollX, winY: window.scrollY,
+    stageTop: stage ? stage.scrollTop : 0, stageLeft: stage ? stage.scrollLeft : 0
+  };
+}
+function restoreScrollPos(pos){
+  if(!pos) return;
+  const apply = () => {
+    window.scrollTo(pos.winX, pos.winY);
+    const stage = $("#editorStage");
+    if(stage){ stage.scrollTop = pos.stageTop; stage.scrollLeft = pos.stageLeft; }
+  };
+  apply();
+  requestAnimationFrame(apply); // erneut anwenden, falls die Fokus-Wiederherstellung selbst gescrollt hat
+}
 function undo(){
   if(App.history.index <= 0) return;
+  const scrollPos = captureScrollPos();
   App.history.index--;
   applySnapshot(App.history.stack[App.history.index]);
+  restoreScrollPos(scrollPos);
 }
 function redo(){
   if(App.history.index >= App.history.stack.length - 1) return;
+  const scrollPos = captureScrollPos();
   App.history.index++;
   applySnapshot(App.history.stack[App.history.index]);
+  restoreScrollPos(scrollPos);
 }
+
+/* --------------------------------------------------------------------
+   15b. CHARACTER-NAMENSVORSCHLÄGE (nur bei Elementtyp "character")
+   -------------------------------------------------------------------- */
+const CharSuggest = { open:false, elId:null, items:[], activeIndex:0 };
+
+function getKnownCharacterNames(excludeId){
+  const seen = new Map();
+  elementsArr().forEach(e => {
+    if(e.type !== "character" || e.id === excludeId) return;
+    const text = stripToPlainText(e.html).trim();
+    if(!text) return;
+    const key = text.toUpperCase();
+    if(!seen.has(key)) seen.set(key, text);
+  });
+  return Array.from(seen.values());
+}
+
+function updateCharSuggest(node, elData){
+  const text = stripToPlainText(elData.html).trim();
+  if(elData.type !== "character" || !text){
+    closeCharSuggest();
+    return;
+  }
+  const query = text.toUpperCase();
+  const matches = getKnownCharacterNames(elData.id)
+    .filter(n => n.toUpperCase().startsWith(query) && n.toUpperCase() !== query)
+    .sort((a,b) => a.localeCompare(b, "de"));
+  if(matches.length === 0){
+    closeCharSuggest();
+    return;
+  }
+  CharSuggest.open = true;
+  CharSuggest.elId = elData.id;
+  CharSuggest.items = matches.slice(0, 6);
+  CharSuggest.activeIndex = 0;
+  renderCharSuggest(node);
+}
+
+function renderCharSuggest(node){
+  removeCharSuggestDom();
+  const dd = document.createElement("div");
+  dd.className = "char-suggest";
+  dd.id = "charSuggestDropdown";
+  CharSuggest.items.forEach((name, i) => {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "char-suggest-item" + (i === CharSuggest.activeIndex ? " active" : "");
+    btn.textContent = name;
+    btn.addEventListener("mousedown", (e) => {
+      e.preventDefault();
+      applyCharSuggestion(name);
+    });
+    dd.appendChild(btn);
+  });
+  document.body.appendChild(dd);
+  const rect = node.getBoundingClientRect();
+  dd.style.left = Math.round(rect.left + window.scrollX) + "px";
+  dd.style.top = Math.round(rect.bottom + window.scrollY + 4) + "px";
+}
+
+function removeCharSuggestDom(){
+  const existing = document.getElementById("charSuggestDropdown");
+  if(existing) existing.remove();
+}
+
+function repositionCharSuggest(){
+  if(!CharSuggest.open) return;
+  const dd = document.getElementById("charSuggestDropdown");
+  const node = $(`#pagesContainer .el[data-id="${CharSuggest.elId}"]`);
+  if(!dd || !node){ closeCharSuggest(); return; }
+  const rect = node.getBoundingClientRect();
+  dd.style.left = Math.round(rect.left + window.scrollX) + "px";
+  dd.style.top = Math.round(rect.bottom + window.scrollY + 4) + "px";
+}
+
+function closeCharSuggest(){
+  if(!CharSuggest.open && !document.getElementById("charSuggestDropdown")) return;
+  CharSuggest.open = false;
+  CharSuggest.elId = null;
+  CharSuggest.items = [];
+  CharSuggest.activeIndex = 0;
+  removeCharSuggestDom();
+}
+
+function moveCharSuggest(dir){
+  if(!CharSuggest.open) return;
+  const n = CharSuggest.items.length;
+  CharSuggest.activeIndex = (CharSuggest.activeIndex + dir + n) % n;
+  $all(".char-suggest-item").forEach((btn, i) => btn.classList.toggle("active", i === CharSuggest.activeIndex));
+}
+
+function applyCharSuggestion(name){
+  const idx = findIndexById(CharSuggest.elId);
+  closeCharSuggest();
+  if(idx === -1) return;
+  const els = elementsArr();
+  els[idx].html = escapeHTML(name);
+  pushHistory();
+  repaginate(true);
+  requestAnimationFrame(() => restoreCaret({id: els[idx].id, offset: name.length}));
+}
+
+document.addEventListener("click", (e) => {
+  if(!CharSuggest.open) return;
+  if(e.target.closest(".char-suggest")) return;
+  if(e.target.closest(`.el[data-id="${CharSuggest.elId}"]`)) return;
+  closeCharSuggest();
+});
 
 /* --------------------------------------------------------------------
    16. ELEMENT EDITING (Enter / Tab / Backspace / Input)
@@ -850,6 +1065,7 @@ function onElFocus(e){
   e.target.classList.add("is-focused");
   const sel = $("#elementTypeSelect");
   sel.value = e.target.dataset.type;
+  if(CharSuggest.open && CharSuggest.elId !== e.target.dataset.id) closeCharSuggest();
 }
 
 function onElPaste(e){
@@ -865,6 +1081,7 @@ function onElInput(e){
   if(idx === -1) return;
   elementsArr()[idx].html = sanitizeInline(node.innerHTML);
   updateStatsLive();
+  updateCharSuggest(node, elementsArr()[idx]);
   repaginate(false);
   historyInputDebounced();
 }
@@ -875,11 +1092,29 @@ function onElKeydown(e){
   const id = node.dataset.id;
   const idx = findIndexById(id);
   if(idx === -1) return;
+
+  // Character-Autovervollständigung hat Vorrang, wenn für dieses Element offen.
+  if(CharSuggest.open && CharSuggest.elId === id){
+    if(e.key === "ArrowDown"){ e.preventDefault(); moveCharSuggest(1); return; }
+    if(e.key === "ArrowUp"){ e.preventDefault(); moveCharSuggest(-1); return; }
+    if(e.key === "Tab" || e.key === "Enter"){
+      e.preventDefault();
+      applyCharSuggestion(CharSuggest.items[CharSuggest.activeIndex]);
+      return;
+    }
+    if(e.key === "Escape"){
+      e.preventDefault();
+      e.stopPropagation();
+      closeCharSuggest();
+      return;
+    }
+  }
+
   const meta = e.ctrlKey || e.metaKey;
 
   if(meta && e.key.toLowerCase() === "s"){ e.preventDefault(); doSave(true); return; }
   if(meta && e.key.toLowerCase() === "p"){ e.preventDefault(); triggerPrint(); return; }
-  if(meta && e.key.toLowerCase() === "e"){ e.preventDefault(); exportPDF(); return; }
+  if(meta && e.key.toLowerCase() === "e"){ e.preventDefault(); openPdfExportModal(); return; }
   if(meta && !e.shiftKey && e.key.toLowerCase() === "z"){ e.preventDefault(); pushHistory(); undo(); return; }
   if(meta && (e.key.toLowerCase() === "y" || (e.shiftKey && e.key.toLowerCase() === "z"))){ e.preventDefault(); redo(); return; }
   if(meta && e.key.toLowerCase() === "b"){ e.preventDefault(); document.execCommand("bold"); onElInput(e); return; }
@@ -904,6 +1139,23 @@ function onElKeydown(e){
       mergeWithPrevious(idx);
       return;
     }
+  }
+
+  // Pfeiltasten-Navigation zwischen Elementen — die native Cursor-Bewegung darf zuerst
+  // greifen (funktioniert normal in mehrzeiligem Text); nur wenn sie sich dadurch vertikal
+  // nicht bewegt (Rand des Elements erreicht), springen wir zum Nachbar-Element.
+  if((e.key === "ArrowUp" || e.key === "ArrowDown") && !e.shiftKey && !e.altKey && !meta){
+    const dir = e.key === "ArrowUp" ? -1 : 1;
+    const beforeRect = getCaretRect(node);
+    setTimeout(() => {
+      const afterRect = getCaretRect(node);
+      const movedVertically = beforeRect && afterRect && Math.abs(afterRect.top - beforeRect.top) > 1;
+      if(!movedVertically){
+        if(dir === -1 && idx > 0) focusElementAt(idx - 1, "end");
+        if(dir === 1 && idx < elementsArr().length - 1) focusElementAt(idx + 1, "start");
+      }
+    }, 0);
+    return;
   }
 }
 
@@ -1028,7 +1280,7 @@ document.addEventListener("click", (e) => {
 $("#exportMenu").addEventListener("click", (e) => {
   const btn = e.target.closest("button"); if(!btn) return;
   $("#exportMenu").hidden = true;
-  if(btn.dataset.action === "pdf") exportPDF();
+  if(btn.dataset.action === "pdf") openPdfExportModal();
   if(btn.dataset.action === "scriptino") exportScriptino();
 });
 
@@ -1044,10 +1296,85 @@ function exportScriptino(){
 }
 
 /* --------------------------------------------------------------------
+   20b. PDF-EXPORT-DIALOG
+   -------------------------------------------------------------------- */
+function openPdfExportModal(){
+  if(!App.currentScript) return;
+  $("#pdfModeFull").checked = true;
+  $("#pdfModeCharacter").checked = false;
+  $("#pdfCharacterOptions").hidden = true;
+  $("#pdfHighlightColor").value = "#fff3a0";
+
+  const names = getKnownCharacterNames();
+  const select = $("#pdfCharacterSelect");
+  select.innerHTML = "";
+  names.forEach(name => {
+    const opt = document.createElement("option");
+    opt.value = name; opt.textContent = name;
+    select.appendChild(opt);
+  });
+
+  const hasCharacters = names.length > 0;
+  $("#pdfModeCharacterRow").style.opacity = hasCharacters ? "1" : "0.5";
+  $("#pdfModeCharacter").disabled = !hasCharacters;
+  $("#pdfNoCharactersHint").hidden = hasCharacters;
+
+  showModal("#modalPdfExport");
+}
+function closePdfExportModal(){ hideModal("#modalPdfExport"); }
+
+$("#btnClosePdfExport").addEventListener("click", closePdfExportModal);
+$("#btnCancelPdfExport").addEventListener("click", closePdfExportModal);
+$("#pdfModeFull").addEventListener("change", () => { $("#pdfCharacterOptions").hidden = true; });
+$("#pdfModeCharacter").addEventListener("change", () => { $("#pdfCharacterOptions").hidden = false; });
+$("#btnConfirmPdfExport").addEventListener("click", () => {
+  const isCharacterMode = $("#pdfModeCharacter").checked;
+  closePdfExportModal();
+  if(isCharacterMode){
+    const character = $("#pdfCharacterSelect").value;
+    const color = $("#pdfHighlightColor").value;
+    exportPDF({ character, color });
+  } else {
+    exportPDF();
+  }
+});
+
+/* --------------------------------------------------------------------
    21. PDF EXPORT
    -------------------------------------------------------------------- */
-function exportPDF(){
+function hexToRgb(hex){
+  const m = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(String(hex||"").trim());
+  if(!m) return [255, 243, 160];
+  return [parseInt(m[1],16), parseInt(m[2],16), parseInt(m[3],16)];
+}
+function escapeRegExp(str){
+  return String(str||"").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+function textMentionsCharacter(text, name){
+  const escaped = escapeRegExp(String(name||"").trim());
+  if(!escaped) return false;
+  let re;
+  try{ re = new RegExp("(^|[^\\p{L}\\p{N}])" + escaped + "([^\\p{L}\\p{N}]|$)", "iu"); }
+  catch(e){ re = new RegExp("(^|[^a-zA-ZäöüÄÖÜß0-9])" + escaped + "([^a-zA-ZäöüÄÖÜß0-9]|$)", "i"); }
+  return re.test(text);
+}
+function drawPdfHighlight(doc, line, drawX, y, align, lineH, rgb){
+  if(!line || !line.trim()) return;
+  const textWidth = doc.getTextWidth(line);
+  const padX = 0.035, padTop = 0.09, padBottom = 0.035;
+  const rectX = align === "right" ? (drawX - textWidth - padX) : (drawX - padX);
+  const rectY = y - lineH + padBottom;
+  const rectW = textWidth + padX * 2;
+  const rectH = lineH - padBottom + padTop;
+  doc.setFillColor(rgb[0], rgb[1], rgb[2]);
+  doc.rect(rectX, rectY, rectW, rectH, "F");
+}
+
+function exportPDF(options){
   if(!App.currentScript){ toast("Kein Skript geöffnet.", "error"); return; }
+  const opts = options || {};
+  const highlightCharacter = (opts.character || "").trim() || null;
+  const highlightRGB = highlightCharacter ? hexToRgb(opts.color || "#FFF3A0") : null;
   try{
     if(!window.jspdf || !window.jspdf.jsPDF){
       toast("PDF-Bibliothek konnte nicht geladen werden. Prüfe deine Internetverbindung.", "error");
@@ -1062,6 +1389,7 @@ function exportPDF(){
     const contentW = pageW - left - right;
     const lineH = 1/6; // klassisches Screenplay: 6 Zeilen pro Zoll bei 12pt Courier
     const script = App.currentScript;
+    const targetUpper = highlightCharacter ? highlightCharacter.toUpperCase() : null;
 
     doc.setFont("courier", "normal");
     doc.setFontSize(12);
@@ -1091,6 +1419,7 @@ function exportPDF(){
       if(y + lineH > pageH - bottom){ newPage(); }
     }
 
+    let lastCharacterName = null;
     script.elements.forEach(elData => {
       const plain = stripToPlainText(elData.html);
       if(plain.trim() === "" && elData.type === "action") return;
@@ -1114,12 +1443,27 @@ function exportPDF(){
           text = text.toUpperCase(); break;
       }
 
+      // Zugehörigkeit zum ausgewählten Charakter bestimmen (für PDF-Hervorhebung).
+      let isHighlighted = false;
+      if(targetUpper){
+        if(elData.type === "character"){
+          isHighlighted = plain.trim().toUpperCase() === targetUpper;
+        } else if(elData.type === "dialogue" || elData.type === "parenthetical"){
+          isHighlighted = !!lastCharacterName && lastCharacterName.toUpperCase() === targetUpper;
+        } else if(elData.type === "action"){
+          isHighlighted = textMentionsCharacter(plain, highlightCharacter);
+        }
+      }
+      if(elData.type === "character") lastCharacterName = plain.trim();
+
       doc.setFont("courier", style);
       doc.setFontSize(12);
       const wrapped = doc.splitTextToSize(text || " ", width);
       wrapped.forEach(line => {
         ensureSpace();
         const drawX = align === "right" ? pageW - right : x;
+        if(isHighlighted) drawPdfHighlight(doc, line, drawX, y, align, lineH, highlightRGB);
+        doc.setFont("courier", style);
         doc.text(line, drawX, y, {align});
         y += lineH;
       });
@@ -1129,9 +1473,10 @@ function exportPDF(){
       }
     });
 
-    const filename = safeFilename(script.title) + ".pdf";
+    const suffix = highlightCharacter ? ("_" + safeFilename(highlightCharacter)) : "";
+    const filename = safeFilename(script.title) + suffix + ".pdf";
     doc.save(filename);
-    toast("PDF wurde exportiert.");
+    toast(highlightCharacter ? `PDF für ${highlightCharacter} exportiert.` : "PDF wurde exportiert.");
   }catch(e){
     console.error(e);
     toast("PDF-Export fehlgeschlagen.", "error");
