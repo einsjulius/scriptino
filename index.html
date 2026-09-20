@@ -41,6 +41,12 @@
     <button class="landing-library-link" id="btnLandingLibrary" type="button">Meine Skripte ansehen →</button>
 
     <p class="landing-footnote">Kostenlos · Kein Account · Deine Daten bleiben auf deinem Gerät</p>
+
+    <nav class="landing-meta-nav" aria-label="Weitere Seiten">
+      <a href="help.html">Hilfe</a>
+      <span class="landing-meta-dot">·</span>
+      <a href="about.html">Über uns</a>
+    </nav>
   </div>
 </section>
 
@@ -71,8 +77,9 @@
     <h2 class="library-title">Meine Skripte</h2>
     <div id="libraryEmpty" class="library-empty" hidden>
       <i data-lucide="film"></i>
-      <p>Noch keine Skripte vorhanden.</p>
-      <button class="btn btn-primary" id="btnEmptyNew" type="button"><i data-lucide="plus"></i> Erstes Skript erstellen</button>
+      <p class="library-empty-title">Keine Skripte vorhanden</p>
+      <p class="library-empty-sub">Beginne mit deiner ersten Geschichte.</p>
+      <button class="btn btn-primary" id="btnEmptyNew" type="button"><i data-lucide="plus"></i> Neues Skript</button>
     </div>
     <div id="libraryGrid" class="library-grid"></div>
   </div>
@@ -131,9 +138,16 @@
   </div>
 
   <footer class="editor-statusbar" id="editorStatusbar">
-    <span id="statsLine">1 Seite · 0 Wörter · ca. 1 Min.</span>
-    <span class="statusbar-dot">·</span>
-    <span id="autosaveLine">✓ Gespeichert</span>
+    <div class="statusbar-left">
+      <span id="statsLine">1 Seite · 0 Wörter · ca. 1 Min.</span>
+      <span class="statusbar-dot">·</span>
+      <span id="autosaveLine">✓ Gespeichert</span>
+    </div>
+    <div class="zoom-controls" id="zoomControls">
+      <button class="zoom-btn" id="btnZoomOut" type="button" title="Verkleinern" aria-label="Dokument verkleinern">−</button>
+      <button class="zoom-level" id="btnZoomReset" type="button" title="Zoom zurücksetzen (100%)">100%</button>
+      <button class="zoom-btn" id="btnZoomIn" type="button" title="Vergrößern" aria-label="Dokument vergrößern">+</button>
+    </div>
   </footer>
 </section>
 
@@ -248,6 +262,44 @@
     </div>
     <div class="modal-foot">
       <button class="btn btn-primary" id="btnSaveScriptSettings" type="button">Übernehmen</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============ MODAL: PDF EXPORT ============ -->
+<div class="modal-overlay" id="modalPdfExport" hidden>
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="pdfExportTitle">
+    <div class="modal-head">
+      <h3 id="pdfExportTitle">PDF exportieren</h3>
+      <button class="icon-btn" id="btnClosePdfExport" type="button" title="Schließen"><i data-lucide="x"></i></button>
+    </div>
+    <div class="modal-body">
+      <label class="radio-row">
+        <input type="radio" name="pdfExportMode" id="pdfModeFull" value="full" checked>
+        <span class="radio-dot"></span>
+        <span class="radio-label">Komplettes Skript</span>
+      </label>
+      <label class="radio-row" id="pdfModeCharacterRow">
+        <input type="radio" name="pdfExportMode" id="pdfModeCharacter" value="character">
+        <span class="radio-dot"></span>
+        <span class="radio-label">Skript für einen Charakter</span>
+      </label>
+
+      <div class="pdf-character-options" id="pdfCharacterOptions" hidden>
+        <div class="field">
+          <label for="pdfCharacterSelect">Charakter auswählen</label>
+          <select id="pdfCharacterSelect" class="settings-select pdf-character-select"></select>
+        </div>
+        <div class="field pdf-color-field">
+          <label for="pdfHighlightColor">Markierungsfarbe</label>
+          <input type="color" id="pdfHighlightColor" value="#fff3a0">
+        </div>
+      </div>
+      <p class="pdf-no-characters-hint" id="pdfNoCharactersHint" hidden>Dieses Skript enthält noch keine Charaktere.</p>
+    </div>
+    <div class="modal-foot">
+      <button class="btn btn-subtle" id="btnCancelPdfExport" type="button">Abbrechen</button>
+      <button class="btn btn-primary" id="btnConfirmPdfExport" type="button">PDF exportieren</button>
     </div>
   </div>
 </div>
