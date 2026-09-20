@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Über uns — Scriptino</title>
+<meta name="description" content="Hinter Scriptino steckt einsjulius — die Idee, Geschichte und Motivation hinter dem kostenlosen Drehbuch-Editor.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Courier+Prime:ital,wght@0,400;0,700;1,400&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body class="subpage-body">
+
+<header class="subpage-header">
+  <a href="index.html" class="subpage-brand">
+    <svg width="22" height="22" viewBox="0 0 34 34" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <rect x="1" y="1" width="32" height="32" rx="7" stroke="currentColor" stroke-width="1.8"/>
+      <path d="M9 12h9M9 17h16M9 22h13" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+    </svg>
+    scriptino
+  </a>
+  <a href="index.html" class="subpage-back">
+    <i data-lucide="arrow-left"></i> Zurück zu Scriptino
+  </a>
+</header>
+
+<main class="subpage-main">
+  <div class="subpage-hero">
+    <h1>Über uns</h1>
+    <p>Die Idee und der Mensch hinter Scriptino.</p>
+  </div>
+
+  <div class="about-photo-frame">
+    <img src="assets/julius.jpg" alt="Foto von Julius" id="aboutPhoto">
+    <div class="about-photo-placeholder" id="aboutPhotoPlaceholder">
+      <i data-lucide="image"></i>
+      <span>assets/julius.jpg</span>
+    </div>
+  </div>
+
+  <section class="subpage-section">
+    <h2>Hinter Scriptino</h2>
+    <p>Hinter Scriptino steckt einsjulius, mit bürgerlichem Namen Julius. Julius ist 19 Jahre alt, Student aus Wien und hat Scriptino mit Hilfe von künstlicher Intelligenz gevibecodet.</p>
+    <p>Scriptino ist aus der Idee entstanden, einen einfachen und kostenlosen Drehbuch-Editor zu entwickeln, der professionell aussieht, aber trotzdem unkompliziert zu bedienen ist — ohne Account, ohne Paywall und ohne dass die eigenen Skripte irgendwo in der Cloud landen müssen.</p>
+  </section>
+
+  <section class="subpage-section">
+    <h2>Fragen, Bugs oder Verbesserungsvorschläge?</h2>
+    <p>Wenn du einen Bug gefunden hast oder eine Idee für Scriptino hast, melde dich gerne.</p>
+    <div class="contact-row">
+      <a class="contact-link" href="mailto:einsjulius@gmail.com"><i data-lucide="mail"></i> einsjulius@gmail.com</a>
+      <a class="contact-link" href="https://instagram.com/einsjulius" target="_blank" rel="noopener"><i data-lucide="instagram"></i> @einsjulius</a>
+    </div>
+  </section>
+</main>
+
+<script src="https://unpkg.com/lucide@latest/dist/umd/lucide.js"></script>
+<script>
+(function(){
+  "use strict";
+  try{
+    var raw = localStorage.getItem("scriptino_settings_v1");
+    var settings = raw ? JSON.parse(raw) : null;
+    if(settings && settings.darkMode) document.documentElement.classList.add("dark");
+  }catch(e){ /* localStorage evtl. blockiert */ }
+
+  document.addEventListener("DOMContentLoaded", function(){
+    try{ if(window.lucide) window.lucide.createIcons(); }catch(e){}
+    var img = document.getElementById("aboutPhoto");
+    var placeholder = document.getElementById("aboutPhotoPlaceholder");
+    if(img){
+      var reflectPhotoState = function(){
+        if(img.complete && img.naturalWidth > 0){
+          img.style.display = "block";
+          if(placeholder) placeholder.style.display = "none";
+        } else if(img.complete){
+          img.style.display = "none";
+          if(placeholder) placeholder.style.display = "flex";
+        }
+      };
+      img.addEventListener("load", reflectPhotoState);
+      img.addEventListener("error", reflectPhotoState);
+      reflectPhotoState(); // Bild kann bereits vor dem Registrieren der Listener fertig geladen sein
+    }
+  });
+})();
+</script>
+</body>
+</html>
