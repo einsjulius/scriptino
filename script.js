@@ -1,1688 +1,687 @@
 /* ==========================================================================
-   SCRIPTINO — application logic
-   Kein Backend. Alles läuft lokal im Browser (localStorage).
+   SCRIPTINO — design tokens
    ========================================================================== */
-(function(){
-"use strict";
-
-/* --------------------------------------------------------------------
-   0. CONSTANTS
-   -------------------------------------------------------------------- */
-const KEY_INDEX = "scriptino_index_v1";
-const KEY_SCRIPT_PREFIX = "scriptino_script_v1_";
-const KEY_SETTINGS = "scriptino_settings_v1";
-const KEY_SEEDED = "scriptino_seeded_v1";
-const KEY_ZOOM = "scriptino_zoom_v1";
-
-const TYPE_ORDER = ["sceneheading","action","character","dialogue","parenthetical","transition","shot"];
-
-const TYPE_LABELS = {
-  sceneheading:"Scene Heading", action:"Action", character:"Character",
-  dialogue:"Dialogue", parenthetical:"Parenthetical", transition:"Transition", shot:"Shot"
-};
-
-const PLACEHOLDERS = {
-  sceneheading:"INT./EXT. ORT – ZEIT", action:"Was passiert in der Szene …",
-  character:"NAME", dialogue:"Text der Figur …", parenthetical:"(Regieanweisung)",
-  transition:"CUT TO:", shot:"CLOSE ON:"
-};
-
-// Smart-Enter: welcher Typ folgt automatisch nach ENTER
-const ENTER_NEXT = {
-  sceneheading:"action", action:"action", character:"dialogue",
-  dialogue:"character", parenthetical:"dialogue", transition:"sceneheading", shot:"action"
-};
-
-// Seitenmaße in px @96dpi und in Zoll für PDF
-const PAGE_SIZES = {
-  letter: { wIn:8.5, hIn:11,    unit:"letter" },
-  a4:     { wIn:8.27, hIn:11.69, unit:"a4" }
-};
-const DPI = 96;
-const MARGIN_IN = { top:1, bottom:1, left:1.5, right:1 };
-const IND_IN = { character:2.2, dialogue:1.0, parenthetical:1.6, dialogueW:3.4, parentheticalW:2.0 };
-
-const DEBOUNCE_REPAGINATE = 320;
-const DEBOUNCE_AUTOSAVE = 900;
-const HISTORY_LIMIT = 60;
-
-/* --------------------------------------------------------------------
-   1. TINY HELPERS
-   -------------------------------------------------------------------- */
-function uid(prefix){ return (prefix||"id") + "_" + Date.now().toString(36) + Math.random().toString(36).slice(2,8); }
-function $(sel, root){ return (root||document).querySelector(sel); }
-function $all(sel, root){ return Array.from((root||document).querySelectorAll(sel)); }
-function escapeHTML(str){
-  return String(str||"").replace(/[&<>]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));
-}
-function stripToPlainText(html){
-  const div = document.createElement("div");
-  div.innerHTML = html || "";
-  return div.textContent || "";
-}
-function sanitizeInline(html){
-  // Erlaubt nur <b>, <strong>, <i>, <em> — entfernt alles andere.
-  const div = document.createElement("div");
-  div.innerHTML = html || "";
-  (function clean(node){
-    Array.from(node.childNodes).forEach(child => {
-      if(child.nodeType === 1){
-        const tag = child.tagName.toLowerCase();
-        if(["b","strong","i","em"].includes(tag)){
-          clean(child);
-        } else {
-          const parent = child.parentNode;
-          while(child.firstChild) parent.insertBefore(child.firstChild, child);
-          parent.removeChild(child);
-        }
-      }
-    });
-  })(div);
-  return div.innerHTML;
-}
-function debounce(fn, ms){
-  let t = null;
-  const wrapped = function(...args){
-    clearTimeout(t);
-    t = setTimeout(()=>fn.apply(null,args), ms);
-  };
-  wrapped.flush = function(...args){ clearTimeout(t); fn.apply(null,args); };
-  wrapped.cancel = function(){ clearTimeout(t); };
-  return wrapped;
-}
-function deepClone(obj){
-  return typeof structuredClone === "function" ? structuredClone(obj) : JSON.parse(JSON.stringify(obj));
-}
-function formatDateShort(iso){
-  try{
-    const d = new Date(iso);
-    const today = new Date();
-    const isToday = d.toDateString() === today.toDateString();
-    const time = d.toLocaleTimeString("de-AT", {hour:"2-digit", minute:"2-digit"});
-    if(isToday) return "Heute, " + time;
-    const yest = new Date(today); yest.setDate(today.getDate()-1);
-    if(d.toDateString() === yest.toDateString()) return "Gestern, " + time;
-    return d.toLocaleDateString("de-AT", {day:"2-digit", month:"2-digit", year:"numeric"}) + ", " + time;
-  }catch(e){ return ""; }
-}
-function download(filename, content, mime){
-  try{
-    const blob = new Blob([content], {type: mime || "application/octet-stream"});
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url; a.download = filename;
-    document.body.appendChild(a); a.click(); document.body.removeChild(a);
-    setTimeout(()=>URL.revokeObjectURL(url), 4000);
-    return true;
-  }catch(e){ console.error(e); return false; }
-}
-function safeFilename(str){
-  return (str||"scriptino").trim().replace(/[^\p{L}\p{N}\-_ ]/gu,"").replace(/\s+/g,"_").slice(0,80) || "scriptino";
-}
-
-/* --------------------------------------------------------------------
-   2. TOASTS
-   -------------------------------------------------------------------- */
-function toast(message, kind){
-  try{
-    const host = $("#toastHost");
-    const el = document.createElement("div");
-    el.className = "toast" + (kind === "error" ? " toast-error" : "");
-    el.textContent = message;
-    host.appendChild(el);
-    requestAnimationFrame(()=> el.classList.add("show"));
-    setTimeout(()=>{
-      el.classList.remove("show");
-      setTimeout(()=> el.remove(), 250);
-    }, 2600);
-  }catch(e){ console.error(e); }
-}
-
-/* --------------------------------------------------------------------
-   3. STORAGE LAYER
-   -------------------------------------------------------------------- */
-const Storage = {
-  loadSettings(){
-    try{
-      const raw = localStorage.getItem(KEY_SETTINGS);
-      const defaults = {
-        darkMode:false, autosave:true, pageNumbers:true, fontSize:12,
-        pageSize:"letter", titlePageDefault:true
-      };
-      return raw ? Object.assign(defaults, JSON.parse(raw)) : defaults;
-    }catch(e){
-      return {darkMode:false, autosave:true, pageNumbers:true, fontSize:12, pageSize:"letter", titlePageDefault:true};
-    }
-  },
-  saveSettings(settings){
-    try{ localStorage.setItem(KEY_SETTINGS, JSON.stringify(settings)); return true; }
-    catch(e){ console.error(e); toast("Einstellungen konnten nicht gespeichert werden.", "error"); return false; }
-  },
-  loadIndex(){
-    try{ return JSON.parse(localStorage.getItem(KEY_INDEX)) || []; }
-    catch(e){ return []; }
-  },
-  saveIndex(idx){
-    try{ localStorage.setItem(KEY_INDEX, JSON.stringify(idx)); return true; }
-    catch(e){ console.error(e); toast("Speicherfehler: lokaler Speicher voll oder blockiert.", "error"); return false; }
-  },
-  loadScript(id){
-    try{ return JSON.parse(localStorage.getItem(KEY_SCRIPT_PREFIX + id)); }
-    catch(e){ return null; }
-  },
-  saveScript(script, pageCount){
-    try{
-      script.updatedAt = new Date().toISOString();
-      localStorage.setItem(KEY_SCRIPT_PREFIX + script.id, JSON.stringify(script));
-      const idx = this.loadIndex();
-      const entry = {
-        id: script.id, title: script.title || "Unbenanntes Skript",
-        author: script.author || "",
-        updatedAt: script.updatedAt, createdAt: script.createdAt,
-        pages: pageCount || 1
-      };
-      const i = idx.findIndex(s => s.id === script.id);
-      if(i >= 0) idx[i] = entry; else idx.unshift(entry);
-      this.saveIndex(idx);
-      return true;
-    }catch(e){
-      console.error(e);
-      toast("Skript konnte nicht gespeichert werden (Speicher voll?).", "error");
-      return false;
-    }
-  },
-  deleteScript(id){
-    try{
-      localStorage.removeItem(KEY_SCRIPT_PREFIX + id);
-      this.saveIndex(this.loadIndex().filter(s => s.id !== id));
-      return true;
-    }catch(e){ console.error(e); return false; }
-  },
-  deleteAll(){
-    try{
-      this.loadIndex().forEach(s => localStorage.removeItem(KEY_SCRIPT_PREFIX + s.id));
-      localStorage.removeItem(KEY_INDEX);
-      return true;
-    }catch(e){ console.error(e); return false; }
-  }
-};
-
-function newEmptyScript(title){
-  const now = new Date().toISOString();
-  return {
-    version:1, id: uid("scr"),
-    title: title || "Unbenanntes Skript", author:"",
-    elements: [ {id: uid("el"), type:"sceneheading", html:""} ],
-    settings: { titlePage: App.settings.titlePageDefault, pageNumbers: App.settings.pageNumbers },
-    createdAt: now, updatedAt: now
-  };
-}
-
-function demoScript(){
-  const now = new Date().toISOString();
-  const lines = [
-    ["transition","FADE IN:"],
-    ["sceneheading","INT. WIENER WOHNUNG – NACHT"],
-    ["action","JULIUS sitzt an seinem Schreibtisch. Der Bildschirm beleuchtet sein Gesicht."],
-    ["action","Plötzlich klingelt sein Handy."],
-    ["character","JULIUS"],
-    ["dialogue","Wer ruft um diese Uhrzeit noch an?"],
-    ["action","Er nimmt das Handy."],
-    ["action","Auf dem Display steht:"],
-    ["action","„UNBEKANNTE NUMMER“"],
-    ["transition","CUT TO:"]
-  ];
-  return {
-    version:1, id: uid("scr"),
-    title:"DER LETZTE TAG", author:"",
-    elements: lines.map(([type,text]) => ({id: uid("el"), type, html: escapeHTML(text)})),
-    settings: { titlePage:true, pageNumbers:true },
-    createdAt: now, updatedAt: now
-  };
-}
-
-/* --------------------------------------------------------------------
-   4. APP STATE
-   -------------------------------------------------------------------- */
-const App = {
-  settings: Storage.loadSettings(),
-  currentScript: null,
-  currentPageCount: 1,
-  focusMode: false,
-  history: { stack: [], index: -1 },
-  activeCardMenuId: null,
-  zoom: loadZoom()
-};
-
-function loadZoom(){
-  try{
-    const v = parseInt(localStorage.getItem(KEY_ZOOM), 10);
-    if(!isNaN(v) && v >= 50 && v <= 200) return v;
-  }catch(e){ /* ignore */ }
-  return 100;
-}
-function saveZoom(v){
-  try{ localStorage.setItem(KEY_ZOOM, String(v)); }catch(e){ /* ignore */ }
-}
-
-/* --------------------------------------------------------------------
-   5. ROUTER
-   -------------------------------------------------------------------- */
-function setRoute(route){
-  document.body.classList.remove("route-landing","route-library","route-editor");
-  document.body.classList.add("route-" + route);
-  $all(".view").forEach(v => v.classList.remove("is-active"));
-  const map = {landing:"#view-landing", library:"#view-library", editor:"#view-editor"};
-  $(map[route]).classList.add("is-active");
-  window.scrollTo(0,0);
-  if(route !== "editor") exitFocusMode(true);
-}
-
-function goLanding(){ setRoute("landing"); }
-function goLibrary(){ renderLibrary(); setRoute("library"); }
-
-function goEditor(scriptId){
-  const script = Storage.loadScript(scriptId);
-  if(!script){ toast("Dieses Skript konnte nicht gefunden werden.", "error"); goLibrary(); return; }
-  setRoute("editor");
-  loadScriptIntoEditor(script);
-}
-
-/* --------------------------------------------------------------------
-   6. LIBRARY VIEW
-   -------------------------------------------------------------------- */
-function renderLibrary(){
-  const idx = Storage.loadIndex().sort((a,b) => new Date(b.updatedAt) - new Date(a.updatedAt));
-  const grid = $("#libraryGrid");
-  const empty = $("#libraryEmpty");
-  grid.innerHTML = "";
-  if(idx.length === 0){
-    empty.hidden = false;
-    grid.hidden = true;
-    return;
-  }
-  empty.hidden = true;
-  grid.hidden = false;
-
-  idx.forEach(entry => {
-    const card = document.createElement("div");
-    card.className = "script-card";
-    card.dataset.id = entry.id;
-    card.innerHTML = `
-      <div class="script-card-top">
-        <div>
-          <h3 class="script-card-title"></h3>
-          <span class="script-card-tag">Drehbuch</span>
-          <p class="script-card-author" hidden></p>
-        </div>
-        <button class="icon-btn script-card-menu-btn" type="button" title="Optionen" aria-label="Optionen">
-          <i data-lucide="more-vertical"></i>
-        </button>
-      </div>
-      <div class="script-card-meta">
-        <p class="script-card-pages"></p>
-        <p class="script-card-edited"></p>
-      </div>
-    `;
-    card.querySelector(".script-card-title").textContent = entry.title || "Unbenanntes Skript";
-    if(entry.author){
-      const authorEl = card.querySelector(".script-card-author");
-      authorEl.textContent = entry.author;
-      authorEl.hidden = false;
-    }
-    card.querySelector(".script-card-edited").textContent = "Zuletzt bearbeitet — " + formatDateShort(entry.updatedAt);
-    card.querySelector(".script-card-pages").textContent = (entry.pages || 1) + (entry.pages === 1 ? " Seite" : " Seiten");
-
-    card.addEventListener("click", (e) => {
-      if(e.target.closest(".script-card-menu-btn") || e.target.closest(".card-menu")) return;
-      goEditor(entry.id);
-    });
-    card.querySelector(".script-card-menu-btn").addEventListener("click", (e) => {
-      e.stopPropagation();
-      toggleCardMenu(card, entry);
-    });
-    grid.appendChild(card);
-  });
-
-  refreshIcons();
-}
-
-function toggleCardMenu(card, entry){
-  closeAllCardMenus();
-  const menu = document.createElement("div");
-  menu.className = "card-menu";
-  menu.innerHTML = `
-    <button type="button" data-act="open"><i data-lucide="edit-3"></i> Öffnen</button>
-    <button type="button" data-act="rename"><i data-lucide="type"></i> Umbenennen</button>
-    <button type="button" data-act="duplicate"><i data-lucide="copy"></i> Duplizieren</button>
-    <button type="button" data-act="delete" class="danger"><i data-lucide="trash-2"></i> Löschen</button>
-  `;
-  card.appendChild(menu);
-  refreshIcons();
-  menu.addEventListener("click", (e) => {
-    const btn = e.target.closest("button"); if(!btn) return;
-    e.stopPropagation();
-    const act = btn.dataset.act;
-    closeAllCardMenus();
-    if(act === "open") goEditor(entry.id);
-    if(act === "rename") openRenameModal(entry.id, entry.title);
-    if(act === "duplicate") duplicateScript(entry.id);
-    if(act === "delete") confirmDeleteScript(entry.id, entry.title);
-  });
-}
-function closeAllCardMenus(){ $all(".card-menu").forEach(m => m.remove()); }
-document.addEventListener("click", closeAllCardMenus);
-
-function duplicateScript(id){
-  const script = Storage.loadScript(id);
-  if(!script) return;
-  const copy = deepClone(script);
-  copy.id = uid("scr");
-  copy.title = (script.title || "Unbenanntes Skript") + " (Kopie)";
-  const now = new Date().toISOString();
-  copy.createdAt = now; copy.updatedAt = now;
-  Storage.saveScript(copy, estimatePageCount(copy));
-  toast("Skript dupliziert.");
-  renderLibrary();
-}
-
-function confirmDeleteScript(id, title){
-  openConfirm({
-    title: "Skript löschen?",
-    body: `„${title || "Unbenanntes Skript"}“ wird unwiderruflich gelöscht. Diese Aktion kann nicht rückgängig gemacht werden.`,
-    onConfirm(){
-      Storage.deleteScript(id);
-      toast("Skript gelöscht.");
-      renderLibrary();
-    }
-  });
-}
-
-/* Rename modal */
-let renameTargetId = null;
-function openRenameModal(id, title){
-  renameTargetId = id;
-  $("#renameInput").value = title || "";
-  showModal("#modalRename");
-  setTimeout(()=> $("#renameInput").focus(), 30);
-}
-function closeRenameModal(){ hideModal("#modalRename"); renameTargetId = null; }
-$("#btnCloseRename").addEventListener("click", closeRenameModal);
-$("#btnRenameSave").addEventListener("click", () => {
-  if(!renameTargetId) return;
-  const script = Storage.loadScript(renameTargetId);
-  if(!script){ closeRenameModal(); return; }
-  script.title = $("#renameInput").value.trim() || "Unbenanntes Skript";
-  Storage.saveScript(script, estimatePageCount(script));
-  if(App.currentScript && App.currentScript.id === script.id){
-    App.currentScript.title = script.title;
-    $("#scriptTitleInput").value = script.title;
-  }
-  closeRenameModal();
-  toast("Skript umbenannt.");
-  renderLibrary();
-});
-$("#renameInput").addEventListener("keydown", (e) => { if(e.key === "Enter"){ e.preventDefault(); $("#btnRenameSave").click(); } });
-
-function estimatePageCount(script){
-  // Grobe Schätzung für Bibliotheks-Karten (~55 Zeilen/Seite), echte Zählung passiert im Editor.
-  const words = script.elements.reduce((sum, el) => sum + stripToPlainText(el.html).split(/\s+/).filter(Boolean).length, 0);
-  return Math.max(1, Math.round(words / 220));
-}
-
-/* --------------------------------------------------------------------
-   7. CONFIRM MODAL (generic)
-   -------------------------------------------------------------------- */
-let confirmCallback = null;
-function openConfirm({title, body, onConfirm}){
-  $("#confirmTitle").textContent = title;
-  $("#confirmBody").textContent = body;
-  confirmCallback = onConfirm;
-  showModal("#modalConfirm");
-}
-$("#btnConfirmCancel").addEventListener("click", () => hideModal("#modalConfirm"));
-$("#btnConfirmOk").addEventListener("click", () => {
-  const cb = confirmCallback;
-  hideModal("#modalConfirm");
-  if(cb) cb();
-});
-
-/* --------------------------------------------------------------------
-   8. MODAL HELPERS
-   -------------------------------------------------------------------- */
-function showModal(sel){ const m = $(sel); m.hidden = false; refreshIcons(); }
-function hideModal(sel){ $(sel).hidden = true; }
-$all(".modal-overlay").forEach(overlay => {
-  overlay.addEventListener("click", (e) => { if(e.target === overlay) overlay.hidden = true; });
-});
-document.addEventListener("keydown", (e) => {
-  if(e.key === "Escape"){
-    let closedModal = false;
-    $all(".modal-overlay").forEach(m => { if(!m.hidden){ m.hidden = true; closedModal = true; } });
-    if(!closedModal && App.focusMode) exitFocusMode();
-  }
-});
-
-/* --------------------------------------------------------------------
-   9. GLOBAL SETTINGS MODAL
-   -------------------------------------------------------------------- */
-function openSettingsModal(){
-  $("#settingDarkMode").checked = !!App.settings.darkMode;
-  $("#settingTitlePage").checked = !!App.settings.titlePageDefault;
-  $("#settingPageNumbers").checked = !!App.settings.pageNumbers;
-  $("#settingAutosave").checked = !!App.settings.autosave;
-  $("#settingFontSize").value = String(App.settings.fontSize || 12);
-  $("#settingPageSize").value = App.settings.pageSize || "letter";
-  showModal("#modalSettings");
-}
-$("#btnOpenSettings").addEventListener("click", openSettingsModal);
-$("#btnEditorSettings").addEventListener("click", openScriptSettingsModal);
-$("#btnCloseSettings").addEventListener("click", () => hideModal("#modalSettings"));
-
-function applyGlobalSetting(key, value){
-  App.settings[key] = value;
-  Storage.saveSettings(App.settings);
-  if(key === "darkMode") applyDarkMode();
-  if((key === "pageSize" || key === "fontSize") && App.currentScript) repaginate(true);
-  if(key === "pageNumbers" && App.currentScript){
-    // Globale Vorgabe ändert nicht automatisch bestehende Skripte — nur neue.
-  }
-}
-$("#settingDarkMode").addEventListener("change", e => applyGlobalSetting("darkMode", e.target.checked));
-$("#settingTitlePage").addEventListener("change", e => applyGlobalSetting("titlePageDefault", e.target.checked));
-$("#settingPageNumbers").addEventListener("change", e => applyGlobalSetting("pageNumbers", e.target.checked));
-$("#settingAutosave").addEventListener("change", e => applyGlobalSetting("autosave", e.target.checked));
-$("#settingFontSize").addEventListener("change", e => applyGlobalSetting("fontSize", parseInt(e.target.value,10)));
-$("#settingPageSize").addEventListener("change", e => applyGlobalSetting("pageSize", e.target.value));
-
-$("#btnDeleteAllData").addEventListener("click", () => {
-  openConfirm({
-    title:"Wirklich alle gespeicherten Skripte löschen?",
-    body:"Diese Aktion kann nicht rückgängig gemacht werden.",
-    onConfirm(){
-      Storage.deleteAll();
-      hideModal("#modalSettings");
-      App.currentScript = null;
-      toast("Alle lokalen Daten wurden gelöscht.");
-      goLibrary();
-    }
-  });
-});
-
-function applyDarkMode(){
-  document.documentElement.classList.toggle("dark", !!App.settings.darkMode);
-}
-
-/* --------------------------------------------------------------------
-   10. SCRIPT SETTINGS MODAL (Titel/Autor/Titelseite je Skript)
-   -------------------------------------------------------------------- */
-function openScriptSettingsModal(){
-  if(!App.currentScript) return;
-  $("#fieldScriptTitle").value = App.currentScript.title || "";
-  $("#fieldScriptAuthor").value = App.currentScript.author || "";
-  $("#fieldShowTitlePage").checked = !!App.currentScript.settings.titlePage;
-  showModal("#modalScriptSettings");
-}
-$("#btnCloseScriptSettings").addEventListener("click", () => hideModal("#modalScriptSettings"));
-$("#btnSaveScriptSettings").addEventListener("click", () => {
-  if(!App.currentScript) return;
-  App.currentScript.title = $("#fieldScriptTitle").value.trim() || "Unbenanntes Skript";
-  App.currentScript.author = $("#fieldScriptAuthor").value.trim();
-  App.currentScript.settings.titlePage = $("#fieldShowTitlePage").checked;
-  $("#scriptTitleInput").value = App.currentScript.title;
-  hideModal("#modalScriptSettings");
-  pushHistory();
-  repaginate(true);
-  scheduleAutosave();
-});
-
-/* --------------------------------------------------------------------
-   11. EDITOR — load / caret helpers
-   -------------------------------------------------------------------- */
-function loadScriptIntoEditor(script){
-  App.currentScript = script;
-  App.history = { stack:[deepClone(script)], index:0 };
-  $("#scriptTitleInput").value = script.title || "Unbenanntes Skript";
-  setSaveState("saved");
-  repaginate(true);
-}
-
-function getCaretOffset(el){
-  const sel = window.getSelection();
-  if(!sel || sel.rangeCount === 0) return 0;
-  const range = sel.getRangeAt(0);
-  if(!el.contains(range.startContainer)) return 0;
-  const pre = range.cloneRange();
-  pre.selectNodeContents(el);
-  pre.setEnd(range.startContainer, range.startOffset);
-  return pre.toString().length;
-}
-function setCaretOffset(el, offset){
-  const range = document.createRange();
-  const sel = window.getSelection();
-  let node = null, remaining = offset;
-  (function walk(n){
-    if(node) return;
-    if(n.nodeType === Node.TEXT_NODE){
-      const len = n.textContent.length;
-      if(remaining <= len){ node = n; return; }
-      remaining -= len;
-    } else {
-      for(const child of n.childNodes){ walk(child); if(node) return; }
-    }
-  })(el);
-  try{
-    if(node){ range.setStart(node, Math.max(0, Math.min(remaining, node.textContent.length))); }
-    else { range.selectNodeContents(el); range.collapse(false); }
-    range.collapse(true);
-    sel.removeAllRanges();
-    sel.addRange(range);
-  }catch(e){ /* Caret-Wiederherstellung best effort */ }
-}
-function captureCaret(){
-  const active = document.activeElement;
-  if(active && active.classList && active.classList.contains("el")){
-    return { id: active.dataset.id, offset: getCaretOffset(active) };
-  }
-  return null;
-}
-function restoreCaret(caret){
-  if(!caret) return;
-  const node = $(`#pagesContainer .el[data-id="${caret.id}"]`);
-  if(node){ node.focus(); setCaretOffset(node, caret.offset); }
-}
-
-function getCaretRect(node){
-  const sel = window.getSelection();
-  if(!sel || sel.rangeCount === 0) return null;
-  const range = sel.getRangeAt(0).cloneRange();
-  range.collapse(true);
-  let rect = range.getClientRects()[0];
-  if(!rect || (rect.width === 0 && rect.height === 0)) rect = range.getBoundingClientRect();
-  if(!rect) return null;
-  return { top: rect.top, bottom: rect.bottom };
-}
-function focusElementAt(index, where){
-  const els = elementsArr();
-  if(index < 0 || index >= els.length) return;
-  const target = els[index];
-  const node = $(`#pagesContainer .el[data-id="${target.id}"]`);
-  if(!node) return;
-  node.focus();
-  const len = stripToPlainText(target.html).length;
-  setCaretOffset(node, where === "end" ? len : 0);
-}
-
-/* --------------------------------------------------------------------
-   12. ELEMENT LOOKUP / MUTATION HELPERS
-   -------------------------------------------------------------------- */
-function elementsArr(){ return App.currentScript.elements; }
-function findIndexById(id){ return elementsArr().findIndex(e => e.id === id); }
-
-function setSaveState(state){
-  const topLabel = $("#topbarSaveState");
-  const bottomLabel = $("#autosaveLine");
-  if(state === "saving"){
-    topLabel.textContent = "Speichert …";
-    bottomLabel.textContent = "Speichert …";
-  } else if(state === "saved"){
-    topLabel.textContent = "Gespeichert";
-    bottomLabel.textContent = "✓ Gespeichert";
-  } else if(state === "error"){
-    topLabel.textContent = "Nicht gespeichert";
-    bottomLabel.textContent = "⚠ Nicht gespeichert";
-  }
-}
-
-function updateStatsLive(){
-  const els = elementsArr();
-  let words = 0, chars = 0;
-  els.forEach(e => {
-    const text = stripToPlainText(e.html).trim();
-    if(text){ words += text.split(/\s+/).filter(Boolean).length; chars += text.length; }
-  });
-  const minutes = Math.max(1, Math.round(App.currentPageCount * 1));
-  $("#statsLine").textContent = `${App.currentPageCount} ${App.currentPageCount===1?"Seite":"Seiten"} · ${words} Wörter · ca. ${minutes} Min.`;
-}
-
-/* --------------------------------------------------------------------
-   13. PAGINATION ENGINE
-   -------------------------------------------------------------------- */
-function pageMetricsFor(settings){
-  const size = PAGE_SIZES[App.settings.pageSize] || PAGE_SIZES.letter;
-  const pageW = Math.round(size.wIn * DPI);
-  const pageH = Math.round(size.hIn * DPI);
-  const mTop = Math.round(MARGIN_IN.top * DPI);
-  const mBottom = Math.round(MARGIN_IN.bottom * DPI);
-  const mLeft = Math.round(MARGIN_IN.left * DPI);
-  const mRight = Math.round(MARGIN_IN.right * DPI);
-  const contentH = pageH - mTop - mBottom;
-  return {pageW, pageH, mTop, mBottom, mLeft, mRight, contentH, fontSize: App.settings.fontSize || 12};
-}
-
-function applyPageVars(node, m){
-  node.style.setProperty("--page-w", m.pageW + "px");
-  node.style.setProperty("--page-h", m.pageH + "px");
-  node.style.setProperty("--m-top", m.mTop + "px");
-  node.style.setProperty("--m-bottom", m.mBottom + "px");
-  node.style.setProperty("--m-left", m.mLeft + "px");
-  node.style.setProperty("--m-right", m.mRight + "px");
-  node.style.setProperty("--font-pt", m.fontSize + "pt");
-  node.style.setProperty("--ind-character", IND_IN.character + "in");
-  node.style.setProperty("--ind-dialogue", IND_IN.dialogue + "in");
-  node.style.setProperty("--ind-parenthetical", IND_IN.parenthetical + "in");
-  node.style.setProperty("--w-dialogue", IND_IN.dialogueW + "in");
-  node.style.setProperty("--w-parenthetical", IND_IN.parentheticalW + "in");
-}
-
-function buildElNode(elData, editable){
-  const div = document.createElement("div");
-  div.className = "el type-" + elData.type;
-  div.dataset.id = elData.id;
-  div.dataset.type = elData.type;
-  div.setAttribute("data-placeholder", PLACEHOLDERS[elData.type] || "");
-  if(editable){
-    div.contentEditable = "true";
-    div.spellcheck = false;
-    bindElEvents(div);
-  }
-  div.innerHTML = elData.html || "";
-  return div;
-}
-
-function measureHeights(m){
-  const measure = $("#pagesMeasure");
-  measure.innerHTML = "";
-  measure.style.width = (m.pageW - m.mLeft - m.mRight) + "px";
-  applyPageVars(measure, m);
-  measure.style.fontFamily = "var(--font-script)";
-  const wrap = document.createElement("div");
-  applyPageVars(wrap, m);
-  measure.appendChild(wrap);
-
-  let cumulative = 0;
-  const heights = [];
-  elementsArr().forEach(elData => {
-    const node = buildElNode(elData, false);
-    wrap.appendChild(node);
-    const total = wrap.getBoundingClientRect().height;
-    heights.push(Math.max(1, total - cumulative));
-    cumulative = total;
-  });
-  return heights;
-}
-
-function packPages(heights, contentH){
-  const pages = [];
-  let current = [];
-  let used = 0;
-  heights.forEach((h, i) => {
-    if(current.length > 0 && used + h > contentH){
-      pages.push(current);
-      current = [i];
-      used = h;
-    } else {
-      current.push(i);
-      used += h;
-    }
-  });
-  if(current.length > 0) pages.push(current);
-  if(pages.length === 0) pages.push([]);
-  return pages;
-}
-
-function renderPages(pageGroups, m, caret){
-  const container = $("#pagesContainer");
-  container.innerHTML = "";
-  const els = elementsArr();
-  const script = App.currentScript;
-
-  if(script.settings.titlePage){
-    const tp = document.createElement("div");
-    tp.className = "page title-page";
-    applyPageVars(tp, m);
-    tp.innerHTML = `
-      <div class="title-page-fields">
-        <div class="title-page-title">${escapeHTML(script.title || "Unbenanntes Skript")}</div>
-        <div class="title-page-by">von</div>
-        <div class="title-page-author">${escapeHTML(script.author || " ")}</div>
-      </div>`;
-    container.appendChild(wrapInScaleContainer(tp));
-  }
-
-  pageGroups.forEach((group, pageIdx) => {
-    const page = document.createElement("div");
-    page.className = "page";
-    applyPageVars(page, m);
-    const content = document.createElement("div");
-    content.className = "page-content";
-    group.forEach(elIndex => {
-      content.appendChild(buildElNode(els[elIndex], true));
-    });
-    page.appendChild(content);
-    if(pageIdx > 0 && script.settings.pageNumbers){
-      const num = document.createElement("div");
-      num.className = "page-number";
-      num.textContent = (pageIdx + 1) + ".";
-      page.appendChild(num);
-    }
-    container.appendChild(wrapInScaleContainer(page));
-  });
-
-  refreshIcons();
-  applyResponsiveScale();
-  if(caret) restoreCaret(caret);
-  repositionCharSuggest();
-}
-
-function wrapInScaleContainer(pageNode){
-  const wrap = document.createElement("div");
-  wrap.className = "page-scale-wrap";
-  wrap.appendChild(pageNode);
-  return wrap;
-}
-
-function applyResponsiveScale(){
-  const stage = $("#editorStage");
-  const firstPage = $(".page-scale-wrap .page");
-  if(!stage || !firstPage) return;
-  const available = stage.clientWidth - 24;
-  const nativeW = firstPage.offsetWidth;
-  const nativeH = firstPage.offsetHeight;
-  if(available <= 0 || !nativeW) return;
-  const fitScale = Math.max(0.1, Math.min(1, available / nativeW));
-  const userZoom = (App.zoom || 100) / 100;
-  const scale = fitScale * userZoom;
-  $all(".page-scale-wrap").forEach(wrap => {
-    const page = wrap.querySelector(".page");
-    wrap.style.width = Math.round(nativeW * scale) + "px";
-    wrap.style.height = Math.round(nativeH * scale) + "px";
-    page.style.transform = scale !== 1 ? `scale(${scale})` : "none";
-    page.style.transformOrigin = "top left";
-  });
-  updateZoomLabel();
-}
-window.addEventListener("resize", debounce(applyResponsiveScale, 150));
-
-/* --------------------------------------------------------------------
-   13b. DOCUMENT ZOOM (nur die Seite, nicht die UI)
-   -------------------------------------------------------------------- */
-function setZoom(newZoom){
-  const clamped = Math.max(50, Math.min(200, Math.round(newZoom / 10) * 10));
-  App.zoom = clamped;
-  saveZoom(clamped);
-  applyResponsiveScale();
-}
-function zoomIn(){ setZoom((App.zoom || 100) + 10); }
-function zoomOut(){ setZoom((App.zoom || 100) - 10); }
-function zoomReset(){ setZoom(100); }
-function updateZoomLabel(){
-  const label = $("#btnZoomReset");
-  if(label) label.textContent = (App.zoom || 100) + "%";
-  const outBtn = $("#btnZoomOut");
-  const inBtn = $("#btnZoomIn");
-  if(outBtn) outBtn.disabled = (App.zoom || 100) <= 50;
-  if(inBtn) inBtn.disabled = (App.zoom || 100) >= 200;
-}
-const btnZoomIn = $("#btnZoomIn");
-const btnZoomOut = $("#btnZoomOut");
-const btnZoomReset = $("#btnZoomReset");
-if(btnZoomIn) btnZoomIn.addEventListener("click", zoomIn);
-if(btnZoomOut) btnZoomOut.addEventListener("click", zoomOut);
-if(btnZoomReset) btnZoomReset.addEventListener("click", zoomReset);
-
-const editorStageEl = $("#editorStage");
-if(editorStageEl){
-  editorStageEl.addEventListener("wheel", (e) => {
-    if(!(e.ctrlKey || e.metaKey)) return;
-    e.preventDefault();
-    if(e.deltaY < 0) zoomIn();
-    else if(e.deltaY > 0) zoomOut();
-  }, { passive:false });
-}
-
-function repaginate(immediate){
-  if(!App.currentScript) return;
-  const run = () => {
-    const caret = captureCaret();
-    const m = pageMetricsFor(App.currentScript.settings);
-    if(elementsArr().length === 0){
-      elementsArr().push({id: uid("el"), type:"sceneheading", html:""});
-    }
-    const heights = measureHeights(m);
-    const groups = packPages(heights, m.contentH);
-    App.currentPageCount = groups.length;
-    renderPages(groups, m, caret);
-    updateStatsLive();
-    scheduleAutosave();
-  };
-  if(immediate){ repaginateDebounced.cancel(); run(); }
-  else repaginateDebounced();
-}
-const repaginateDebounced = debounce(() => {
-  const caret = captureCaret();
-  const m = pageMetricsFor(App.currentScript.settings);
-  const heights = measureHeights(m);
-  const groups = packPages(heights, m.contentH);
-  App.currentPageCount = groups.length;
-  renderPages(groups, m, caret);
-  updateStatsLive();
-  scheduleAutosave();
-}, DEBOUNCE_REPAGINATE);
-
-/* --------------------------------------------------------------------
-   14. AUTOSAVE
-   -------------------------------------------------------------------- */
-const scheduleAutosave = debounce(() => {
-  if(!App.currentScript) return;
-  if(!App.settings.autosave){ setSaveState("saved"); return; }
-  doSave();
-}, DEBOUNCE_AUTOSAVE);
-
-function doSave(showToast){
-  if(!App.currentScript) return;
-  setSaveState("saving");
-  const ok = Storage.saveScript(App.currentScript, App.currentPageCount);
-  setSaveState(ok ? "saved" : "error");
-  if(showToast) toast(ok ? "Skript gespeichert." : "Speichern fehlgeschlagen.", ok ? undefined : "error");
-}
-
-/* --------------------------------------------------------------------
-   15. HISTORY (Undo/Redo)
-   -------------------------------------------------------------------- */
-function pushHistory(){
-  if(!App.currentScript) return;
-  const snap = deepClone({elements: App.currentScript.elements, title: App.currentScript.title, author: App.currentScript.author, settings: App.currentScript.settings});
-  const last = App.history.stack[App.history.index];
-  if(last && JSON.stringify(last) === JSON.stringify(snap)) return;
-  App.history.stack = App.history.stack.slice(0, App.history.index + 1);
-  App.history.stack.push(snap);
-  if(App.history.stack.length > HISTORY_LIMIT) App.history.stack.shift();
-  App.history.index = App.history.stack.length - 1;
-}
-function applySnapshot(snap){
-  App.currentScript.elements = deepClone(snap.elements);
-  App.currentScript.title = snap.title;
-  App.currentScript.author = snap.author;
-  App.currentScript.settings = snap.settings;
-  $("#scriptTitleInput").value = App.currentScript.title || "Unbenanntes Skript";
-  repaginate(true);
-  scheduleAutosave();
-}
-function captureScrollPos(){
-  const stage = $("#editorStage");
-  return {
-    winX: window.scrollX, winY: window.scrollY,
-    stageTop: stage ? stage.scrollTop : 0, stageLeft: stage ? stage.scrollLeft : 0
-  };
-}
-function restoreScrollPos(pos){
-  if(!pos) return;
-  const apply = () => {
-    window.scrollTo(pos.winX, pos.winY);
-    const stage = $("#editorStage");
-    if(stage){ stage.scrollTop = pos.stageTop; stage.scrollLeft = pos.stageLeft; }
-  };
-  apply();
-  requestAnimationFrame(apply); // erneut anwenden, falls die Fokus-Wiederherstellung selbst gescrollt hat
-}
-function undo(){
-  if(App.history.index <= 0) return;
-  const scrollPos = captureScrollPos();
-  App.history.index--;
-  applySnapshot(App.history.stack[App.history.index]);
-  restoreScrollPos(scrollPos);
-}
-function redo(){
-  if(App.history.index >= App.history.stack.length - 1) return;
-  const scrollPos = captureScrollPos();
-  App.history.index++;
-  applySnapshot(App.history.stack[App.history.index]);
-  restoreScrollPos(scrollPos);
-}
-
-/* --------------------------------------------------------------------
-   15b. CHARACTER-NAMENSVORSCHLÄGE (nur bei Elementtyp "character")
-   -------------------------------------------------------------------- */
-const CharSuggest = { open:false, elId:null, items:[], activeIndex:0 };
-
-function getKnownCharacterNames(excludeId){
-  const seen = new Map();
-  elementsArr().forEach(e => {
-    if(e.type !== "character" || e.id === excludeId) return;
-    const text = stripToPlainText(e.html).trim();
-    if(!text) return;
-    const key = text.toUpperCase();
-    if(!seen.has(key)) seen.set(key, text);
-  });
-  return Array.from(seen.values());
-}
-
-function updateCharSuggest(node, elData){
-  const text = stripToPlainText(elData.html).trim();
-  if(elData.type !== "character" || !text){
-    closeCharSuggest();
-    return;
-  }
-  const query = text.toUpperCase();
-  const matches = getKnownCharacterNames(elData.id)
-    .filter(n => n.toUpperCase().startsWith(query) && n.toUpperCase() !== query)
-    .sort((a,b) => a.localeCompare(b, "de"));
-  if(matches.length === 0){
-    closeCharSuggest();
-    return;
-  }
-  CharSuggest.open = true;
-  CharSuggest.elId = elData.id;
-  CharSuggest.items = matches.slice(0, 6);
-  CharSuggest.activeIndex = 0;
-  renderCharSuggest(node);
-}
-
-function renderCharSuggest(node){
-  removeCharSuggestDom();
-  const dd = document.createElement("div");
-  dd.className = "char-suggest";
-  dd.id = "charSuggestDropdown";
-  CharSuggest.items.forEach((name, i) => {
-    const btn = document.createElement("button");
-    btn.type = "button";
-    btn.className = "char-suggest-item" + (i === CharSuggest.activeIndex ? " active" : "");
-    btn.textContent = name;
-    btn.addEventListener("mousedown", (e) => {
-      e.preventDefault();
-      applyCharSuggestion(name);
-    });
-    dd.appendChild(btn);
-  });
-  document.body.appendChild(dd);
-  const rect = node.getBoundingClientRect();
-  dd.style.left = Math.round(rect.left + window.scrollX) + "px";
-  dd.style.top = Math.round(rect.bottom + window.scrollY + 4) + "px";
-}
-
-function removeCharSuggestDom(){
-  const existing = document.getElementById("charSuggestDropdown");
-  if(existing) existing.remove();
-}
-
-function repositionCharSuggest(){
-  if(!CharSuggest.open) return;
-  const dd = document.getElementById("charSuggestDropdown");
-  const node = $(`#pagesContainer .el[data-id="${CharSuggest.elId}"]`);
-  if(!dd || !node){ closeCharSuggest(); return; }
-  const rect = node.getBoundingClientRect();
-  dd.style.left = Math.round(rect.left + window.scrollX) + "px";
-  dd.style.top = Math.round(rect.bottom + window.scrollY + 4) + "px";
-}
-
-function closeCharSuggest(){
-  if(!CharSuggest.open && !document.getElementById("charSuggestDropdown")) return;
-  CharSuggest.open = false;
-  CharSuggest.elId = null;
-  CharSuggest.items = [];
-  CharSuggest.activeIndex = 0;
-  removeCharSuggestDom();
-}
-
-function moveCharSuggest(dir){
-  if(!CharSuggest.open) return;
-  const n = CharSuggest.items.length;
-  CharSuggest.activeIndex = (CharSuggest.activeIndex + dir + n) % n;
-  $all(".char-suggest-item").forEach((btn, i) => btn.classList.toggle("active", i === CharSuggest.activeIndex));
-}
-
-function applyCharSuggestion(name){
-  const idx = findIndexById(CharSuggest.elId);
-  closeCharSuggest();
-  if(idx === -1) return;
-  const els = elementsArr();
-  els[idx].html = escapeHTML(name);
-  pushHistory();
-  repaginate(true);
-  requestAnimationFrame(() => restoreCaret({id: els[idx].id, offset: name.length}));
-}
-
-document.addEventListener("click", (e) => {
-  if(!CharSuggest.open) return;
-  if(e.target.closest(".char-suggest")) return;
-  if(e.target.closest(`.el[data-id="${CharSuggest.elId}"]`)) return;
-  closeCharSuggest();
-});
-
-/* --------------------------------------------------------------------
-   16. ELEMENT EDITING (Enter / Tab / Backspace / Input)
-   -------------------------------------------------------------------- */
-function bindElEvents(node){
-  node.addEventListener("input", onElInput);
-  node.addEventListener("keydown", onElKeydown);
-  node.addEventListener("focus", onElFocus);
-  node.addEventListener("paste", onElPaste);
-}
-
-function onElFocus(e){
-  $all(".el.is-focused").forEach(n => n.classList.remove("is-focused"));
-  e.target.classList.add("is-focused");
-  const sel = $("#elementTypeSelect");
-  sel.value = e.target.dataset.type;
-  if(CharSuggest.open && CharSuggest.elId !== e.target.dataset.id) closeCharSuggest();
-}
-
-function onElPaste(e){
-  e.preventDefault();
-  const text = (e.clipboardData || window.clipboardData).getData("text/plain");
-  document.execCommand("insertText", false, text.replace(/\r/g,""));
-}
-
-function onElInput(e){
-  const node = e.target;
-  const id = node.dataset.id;
-  const idx = findIndexById(id);
-  if(idx === -1) return;
-  elementsArr()[idx].html = sanitizeInline(node.innerHTML);
-  updateStatsLive();
-  updateCharSuggest(node, elementsArr()[idx]);
-  repaginate(false);
-  historyInputDebounced();
-}
-const historyInputDebounced = debounce(() => pushHistory(), 700);
-
-function onElKeydown(e){
-  const node = e.target;
-  const id = node.dataset.id;
-  const idx = findIndexById(id);
-  if(idx === -1) return;
-
-  // Character-Autovervollständigung hat Vorrang, wenn für dieses Element offen.
-  if(CharSuggest.open && CharSuggest.elId === id){
-    if(e.key === "ArrowDown"){ e.preventDefault(); moveCharSuggest(1); return; }
-    if(e.key === "ArrowUp"){ e.preventDefault(); moveCharSuggest(-1); return; }
-    if(e.key === "Tab" || e.key === "Enter"){
-      e.preventDefault();
-      applyCharSuggestion(CharSuggest.items[CharSuggest.activeIndex]);
-      return;
-    }
-    if(e.key === "Escape"){
-      e.preventDefault();
-      e.stopPropagation();
-      closeCharSuggest();
-      return;
-    }
-  }
-
-  const meta = e.ctrlKey || e.metaKey;
-
-  if(meta && e.key.toLowerCase() === "s"){ e.preventDefault(); doSave(true); return; }
-  if(meta && e.key.toLowerCase() === "p"){ e.preventDefault(); triggerPrint(); return; }
-  if(meta && e.key.toLowerCase() === "e"){ e.preventDefault(); openPdfExportModal(); return; }
-  if(meta && !e.shiftKey && e.key.toLowerCase() === "z"){ e.preventDefault(); pushHistory(); undo(); return; }
-  if(meta && (e.key.toLowerCase() === "y" || (e.shiftKey && e.key.toLowerCase() === "z"))){ e.preventDefault(); redo(); return; }
-  if(meta && e.key.toLowerCase() === "b"){ e.preventDefault(); document.execCommand("bold"); onElInput(e); return; }
-  if(meta && e.key.toLowerCase() === "i"){ e.preventDefault(); document.execCommand("italic"); onElInput(e); return; }
-
-  if(e.key === "Enter"){
-    e.preventDefault();
-    handleEnter(idx, node);
-    return;
-  }
-  if(e.key === "Tab"){
-    e.preventDefault();
-    cycleType(idx, e.shiftKey ? -1 : 1);
-    return;
-  }
-  if(e.key === "Backspace"){
-    const offset = getCaretOffset(node);
-    const sel = window.getSelection();
-    const collapsed = sel && sel.isCollapsed;
-    if(offset === 0 && collapsed){
-      e.preventDefault();
-      mergeWithPrevious(idx);
-      return;
-    }
-  }
-
-  // Pfeiltasten-Navigation zwischen Elementen — die native Cursor-Bewegung darf zuerst
-  // greifen (funktioniert normal in mehrzeiligem Text); nur wenn sie sich dadurch vertikal
-  // nicht bewegt (Rand des Elements erreicht), springen wir zum Nachbar-Element.
-  if((e.key === "ArrowUp" || e.key === "ArrowDown") && !e.shiftKey && !e.altKey && !meta){
-    const dir = e.key === "ArrowUp" ? -1 : 1;
-    const beforeRect = getCaretRect(node);
-    setTimeout(() => {
-      const afterRect = getCaretRect(node);
-      const movedVertically = beforeRect && afterRect && Math.abs(afterRect.top - beforeRect.top) > 1;
-      if(!movedVertically){
-        if(dir === -1 && idx > 0) focusElementAt(idx - 1, "end");
-        if(dir === 1 && idx < elementsArr().length - 1) focusElementAt(idx + 1, "start");
-      }
-    }, 0);
-    return;
-  }
-}
-
-function handleEnter(idx, node){
-  const offset = getCaretOffset(node);
-  const text = node.textContent || "";
-  const before = text.slice(0, offset);
-  const after = text.slice(offset);
-  const els = elementsArr();
-  els[idx].html = escapeHTML(before);
-  const nextType = ENTER_NEXT[els[idx].type] || "action";
-  const newEl = {id: uid("el"), type: nextType, html: escapeHTML(after)};
-  els.splice(idx + 1, 0, newEl);
-  pushHistory();
-  repaginate(true);
-  requestAnimationFrame(() => restoreCaret({id: newEl.id, offset:0}));
-}
-
-function cycleType(idx, dir){
-  const els = elementsArr();
-  const caret = {id: els[idx].id, offset: getCaretOffset(document.activeElement)};
-  const order = TYPE_ORDER;
-  const cur = order.indexOf(els[idx].type);
-  const next = (cur + dir + order.length) % order.length;
-  els[idx].type = order[next];
-  pushHistory();
-  repaginate(true);
-  requestAnimationFrame(() => restoreCaret(caret));
-}
-
-function mergeWithPrevious(idx){
-  if(idx === 0) return;
-  const els = elementsArr();
-  const cur = els[idx];
-  const prev = els[idx - 1];
-  const prevLen = stripToPlainText(prev.html).length;
-  if(stripToPlainText(cur.html).trim() === ""){
-    els.splice(idx, 1);
-  } else {
-    prev.html = sanitizeInline((prev.html || "") + (cur.html || ""));
-    els.splice(idx, 1);
-  }
-  pushHistory();
-  repaginate(true);
-  requestAnimationFrame(() => restoreCaret({id: prev.id, offset: prevLen}));
-}
-
-/* Toolbar: Element-Typ-Dropdown */
-$("#elementTypeSelect").addEventListener("change", (e) => {
-  const active = $(".el.is-focused") || $("#pagesContainer .el");
-  if(!active) return;
-  const idx = findIndexById(active.dataset.id);
-  if(idx === -1) return;
-  elementsArr()[idx].type = e.target.value;
-  pushHistory();
-  repaginate(true);
-  requestAnimationFrame(() => restoreCaret({id: active.dataset.id, offset: 0}));
-});
-$("#btnBold").addEventListener("click", () => { document.execCommand("bold"); const a=$(".el.is-focused"); if(a) onElInput({target:a}); });
-$("#btnItalic").addEventListener("click", () => { document.execCommand("italic"); const a=$(".el.is-focused"); if(a) onElInput({target:a}); });
-$("#btnUndo").addEventListener("click", undo);
-$("#btnRedo").addEventListener("click", redo);
-
-/* --------------------------------------------------------------------
-   17. TITLE INPUT / SCRIPT TITLE SYNC
-   -------------------------------------------------------------------- */
-$("#scriptTitleInput").addEventListener("input", (e) => {
-  if(!App.currentScript) return;
-  App.currentScript.title = e.target.value;
-  if(App.currentScript.settings.titlePage) repaginate(false);
-  scheduleAutosave();
-});
-$("#scriptTitleInput").addEventListener("blur", () => { pushHistory(); });
-
-/* --------------------------------------------------------------------
-   18. FOCUS MODE
-   -------------------------------------------------------------------- */
-function enterFocusMode(){
-  App.focusMode = true;
-  document.body.classList.add("focus-mode");
-  $("#btnFocusMode").classList.add("is-active");
-  showFocusHint();
-}
-function exitFocusMode(silent){
-  if(!App.focusMode) return;
-  App.focusMode = false;
-  document.body.classList.remove("focus-mode");
-  $("#btnFocusMode").classList.remove("is-active");
-}
-function showFocusHint(){
-  let hint = $(".focus-exit-hint");
-  if(!hint){
-    hint = document.createElement("div");
-    hint.className = "focus-exit-hint";
-    hint.textContent = "ESC zum Verlassen des Fokusmodus";
-    document.body.appendChild(hint);
-  }
-  hint.classList.add("show");
-  setTimeout(()=> hint.classList.remove("show"), 2200);
-}
-$("#btnFocusMode").addEventListener("click", () => App.focusMode ? exitFocusMode() : enterFocusMode());
-
-/* --------------------------------------------------------------------
-   19. PRINT
-   -------------------------------------------------------------------- */
-function triggerPrint(){
-  try{ window.print(); }catch(e){ toast("Drucken wird von diesem Browser nicht unterstützt.", "error"); }
-}
-$("#btnPrint").addEventListener("click", triggerPrint);
-
-/* --------------------------------------------------------------------
-   20. EXPORT MENU
-   -------------------------------------------------------------------- */
-$("#btnExportMenu").addEventListener("click", (e) => {
-  e.stopPropagation();
-  const menu = $("#exportMenu");
-  menu.hidden = !menu.hidden;
-});
-document.addEventListener("click", (e) => {
-  if(!e.target.closest(".export-menu-wrap")) $("#exportMenu").hidden = true;
-});
-$("#exportMenu").addEventListener("click", (e) => {
-  const btn = e.target.closest("button"); if(!btn) return;
-  $("#exportMenu").hidden = true;
-  if(btn.dataset.action === "pdf") openPdfExportModal();
-  if(btn.dataset.action === "scriptino") exportScriptino();
-});
-
-function exportScriptino(){
-  if(!App.currentScript) return;
-  try{
-    const payload = deepClone(App.currentScript);
-    const json = JSON.stringify(payload, null, 2);
-    const filename = safeFilename(App.currentScript.title) + ".scriptino";
-    if(download(filename, json, "application/json")) toast("Skript als .scriptino exportiert.");
-    else toast("Export fehlgeschlagen.", "error");
-  }catch(e){ console.error(e); toast("Export fehlgeschlagen.", "error"); }
-}
-
-/* --------------------------------------------------------------------
-   20b. PDF-EXPORT-DIALOG
-   -------------------------------------------------------------------- */
-function openPdfExportModal(){
-  if(!App.currentScript) return;
-  $("#pdfModeFull").checked = true;
-  $("#pdfModeCharacter").checked = false;
-  $("#pdfCharacterOptions").hidden = true;
-  $("#pdfHighlightColor").value = "#fff3a0";
-
-  const names = getKnownCharacterNames();
-  const select = $("#pdfCharacterSelect");
-  select.innerHTML = "";
-  names.forEach(name => {
-    const opt = document.createElement("option");
-    opt.value = name; opt.textContent = name;
-    select.appendChild(opt);
-  });
-
-  const hasCharacters = names.length > 0;
-  $("#pdfModeCharacterRow").style.opacity = hasCharacters ? "1" : "0.5";
-  $("#pdfModeCharacter").disabled = !hasCharacters;
-  $("#pdfNoCharactersHint").hidden = hasCharacters;
-
-  showModal("#modalPdfExport");
-}
-function closePdfExportModal(){ hideModal("#modalPdfExport"); }
-
-$("#btnClosePdfExport").addEventListener("click", closePdfExportModal);
-$("#btnCancelPdfExport").addEventListener("click", closePdfExportModal);
-$("#pdfModeFull").addEventListener("change", () => { $("#pdfCharacterOptions").hidden = true; });
-$("#pdfModeCharacter").addEventListener("change", () => { $("#pdfCharacterOptions").hidden = false; });
-$("#btnConfirmPdfExport").addEventListener("click", () => {
-  const isCharacterMode = $("#pdfModeCharacter").checked;
-  closePdfExportModal();
-  if(isCharacterMode){
-    const character = $("#pdfCharacterSelect").value;
-    const color = $("#pdfHighlightColor").value;
-    exportPDF({ character, color });
-  } else {
-    exportPDF();
-  }
-});
-
-/* --------------------------------------------------------------------
-   21. PDF EXPORT
-   -------------------------------------------------------------------- */
-function hexToRgb(hex){
-  const m = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(String(hex||"").trim());
-  if(!m) return [255, 243, 160];
-  return [parseInt(m[1],16), parseInt(m[2],16), parseInt(m[3],16)];
-}
-function escapeRegExp(str){
-  return String(str||"").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-function textMentionsCharacter(text, name){
-  const escaped = escapeRegExp(String(name||"").trim());
-  if(!escaped) return false;
-  let re;
-  try{ re = new RegExp("(^|[^\\p{L}\\p{N}])" + escaped + "([^\\p{L}\\p{N}]|$)", "iu"); }
-  catch(e){ re = new RegExp("(^|[^a-zA-ZäöüÄÖÜß0-9])" + escaped + "([^a-zA-ZäöüÄÖÜß0-9]|$)", "i"); }
-  return re.test(text);
-}
-function drawPdfHighlight(doc, line, drawX, y, align, lineH, rgb){
-  if(!line || !line.trim()) return;
-  const textWidth = doc.getTextWidth(line);
-  const padX = 0.035, padTop = 0.09, padBottom = 0.035;
-  const rectX = align === "right" ? (drawX - textWidth - padX) : (drawX - padX);
-  const rectY = y - lineH + padBottom;
-  const rectW = textWidth + padX * 2;
-  const rectH = lineH - padBottom + padTop;
-  doc.setFillColor(rgb[0], rgb[1], rgb[2]);
-  doc.rect(rectX, rectY, rectW, rectH, "F");
-}
-
-function exportPDF(options){
-  if(!App.currentScript){ toast("Kein Skript geöffnet.", "error"); return; }
-  const opts = options || {};
-  const highlightCharacter = (opts.character || "").trim() || null;
-  const highlightRGB = highlightCharacter ? hexToRgb(opts.color || "#FFF3A0") : null;
-  try{
-    if(!window.jspdf || !window.jspdf.jsPDF){
-      toast("PDF-Bibliothek konnte nicht geladen werden. Prüfe deine Internetverbindung.", "error");
-      return;
-    }
-    const { jsPDF } = window.jspdf;
-    const format = App.settings.pageSize === "a4" ? "a4" : "letter";
-    const doc = new jsPDF({ unit:"in", format });
-    const pageW = doc.internal.pageSize.getWidth();
-    const pageH = doc.internal.pageSize.getHeight();
-    const left = MARGIN_IN.left, right = MARGIN_IN.right, top = MARGIN_IN.top, bottom = MARGIN_IN.bottom;
-    const contentW = pageW - left - right;
-    const lineH = 1/6; // klassisches Screenplay: 6 Zeilen pro Zoll bei 12pt Courier
-    const script = App.currentScript;
-    const targetUpper = highlightCharacter ? highlightCharacter.toUpperCase() : null;
-
-    doc.setFont("courier", "normal");
-    doc.setFontSize(12);
-
-    if(script.settings.titlePage){
-      doc.setFont("courier", "bold");
-      doc.text((script.title || "UNBENANNTES SKRIPT").toUpperCase(), pageW/2, pageH * 0.42, {align:"center"});
-      doc.setFont("courier", "normal");
-      doc.text("von", pageW/2, pageH * 0.42 + 0.5, {align:"center"});
-      doc.text(script.author || "", pageW/2, pageH * 0.42 + 1.0, {align:"center"});
-      doc.addPage();
-    }
-
-    let y = top;
-    let pageNum = 1;
-
-    function newPage(){
-      doc.addPage();
-      pageNum++;
-      y = top;
-      if(script.settings.pageNumbers && pageNum > 1){
-        doc.setFont("courier","normal"); doc.setFontSize(12);
-        doc.text(pageNum + ".", pageW - right, top - 0.35, {align:"right"});
-      }
-    }
-    function ensureSpace(){
-      if(y + lineH > pageH - bottom){ newPage(); }
-    }
-
-    let lastCharacterName = null;
-    script.elements.forEach(elData => {
-      const plain = stripToPlainText(elData.html);
-      if(plain.trim() === "" && elData.type === "action") return;
-      let text = plain;
-      let x = left, width = contentW, align = "left", style = "normal";
-
-      switch(elData.type){
-        case "sceneheading":
-          text = text.toUpperCase(); style = "bold"; break;
-        case "action":
-          break;
-        case "character":
-          text = text.toUpperCase(); x = left + IND_IN.character; width = contentW - IND_IN.character; break;
-        case "dialogue":
-          x = left + IND_IN.dialogue; width = IND_IN.dialogueW; break;
-        case "parenthetical":
-          x = left + IND_IN.parenthetical; width = IND_IN.parentheticalW; style = "italic"; break;
-        case "transition":
-          text = text.toUpperCase(); align = "right"; break;
-        case "shot":
-          text = text.toUpperCase(); break;
-      }
-
-      // Zugehörigkeit zum ausgewählten Charakter bestimmen (für PDF-Hervorhebung).
-      let isHighlighted = false;
-      if(targetUpper){
-        if(elData.type === "character"){
-          isHighlighted = plain.trim().toUpperCase() === targetUpper;
-        } else if(elData.type === "dialogue" || elData.type === "parenthetical"){
-          isHighlighted = !!lastCharacterName && lastCharacterName.toUpperCase() === targetUpper;
-        } else if(elData.type === "action"){
-          isHighlighted = textMentionsCharacter(plain, highlightCharacter);
-        }
-      }
-      if(elData.type === "character") lastCharacterName = plain.trim();
-
-      doc.setFont("courier", style);
-      doc.setFontSize(12);
-      const wrapped = doc.splitTextToSize(text || " ", width);
-      wrapped.forEach(line => {
-        ensureSpace();
-        const drawX = align === "right" ? pageW - right : x;
-        if(isHighlighted) drawPdfHighlight(doc, line, drawX, y, align, lineH, highlightRGB);
-        doc.setFont("courier", style);
-        doc.text(line, drawX, y, {align});
-        y += lineH;
-      });
-
-      if(elData.type !== "character" && elData.type !== "parenthetical"){
-        y += lineH;
-      }
-    });
-
-    const suffix = highlightCharacter ? ("_" + safeFilename(highlightCharacter)) : "";
-    const filename = safeFilename(script.title) + suffix + ".pdf";
-    doc.save(filename);
-    toast(highlightCharacter ? `PDF für ${highlightCharacter} exportiert.` : "PDF wurde exportiert.");
-  }catch(e){
-    console.error(e);
-    toast("PDF-Export fehlgeschlagen.", "error");
-  }
-}
-
-/* --------------------------------------------------------------------
-   22. IMPORT — .scriptino / .txt / Backup
-   -------------------------------------------------------------------- */
-function readFileAsText(file){
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(reader.result);
-    reader.onerror = () => reject(new Error("Datei konnte nicht gelesen werden."));
-    reader.readAsText(file);
-  });
-}
-
-function importTxtToElements(text){
-  const lines = text.replace(/\r/g,"").split("\n");
-  const out = [];
-  let prevType = null;
-  lines.forEach(raw => {
-    const line = raw.trim();
-    if(line === ""){ return; }
-    let type;
-    const isUpperShort = line === line.toUpperCase() && /[A-ZÄÖÜ]/.test(line) && line.length <= 38 && !/[a-zäöüß]/.test(line);
-    if(/^(INT|EXT|INT\/EXT|I\/E)[\.\s]/i.test(line)){
-      type = "sceneheading";
-    } else if(/^\(.*\)$/.test(line)){
-      type = "parenthetical";
-    } else if(isUpperShort){
-      // Zwei Character-Cues direkt hintereinander sind unwahrscheinlich — sonst ist Großschrift+kurz ein Character.
-      type = /:$/.test(line) ? "transition" : (prevType === "character" ? "action" : "character");
-    } else if(prevType === "character" || prevType === "parenthetical"){
-      type = "dialogue";
-    } else {
-      // Nach Dialogue/Action/Doku-Anfang ist eine normale Zeile am wahrscheinlichsten neue Action.
-      type = "action";
-    }
-    out.push({id: uid("el"), type, html: escapeHTML(line)});
-    prevType = type;
-  });
-  if(out.length === 0) out.push({id: uid("el"), type:"sceneheading", html:""});
-  return out;
-}
-
-async function handleImportScriptFile(file){
-  if(!file) return;
-  try{
-    const text = await readFileAsText(file);
-    let script;
-    if(file.name.toLowerCase().endsWith(".txt")){
-      const now = new Date().toISOString();
-      script = {
-        version:1, id: uid("scr"),
-        title: file.name.replace(/\.txt$/i,"") || "Importiertes Skript",
-        author:"", elements: importTxtToElements(text),
-        settings: {titlePage:true, pageNumbers:true}, createdAt: now, updatedAt: now
-      };
-    } else {
-      const parsed = JSON.parse(text);
-      if(!parsed || !Array.isArray(parsed.elements)) throw new Error("invalid");
-      const now = new Date().toISOString();
-      script = {
-        version:1, id: uid("scr"),
-        title: parsed.title || "Importiertes Skript",
-        author: parsed.author || "",
-        elements: parsed.elements.map(e => ({id: uid("el"), type: TYPE_ORDER.includes(e.type)?e.type:"action", html: sanitizeInline(e.html || escapeHTML(e.text||""))})),
-        settings: {
-          titlePage: parsed.settings ? !!parsed.settings.titlePage : true,
-          pageNumbers: parsed.settings ? !!parsed.settings.pageNumbers : true
-        },
-        createdAt: parsed.createdAt || now, updatedAt: now
-      };
-    }
-    Storage.saveScript(script, estimatePageCount(script));
-    toast("Skript importiert.");
-    goEditor(script.id);
-  }catch(e){
-    console.error(e);
-    toast("Diese Datei konnte nicht importiert werden.", "error");
-  }
-}
-
-$("#fileImportScript").addEventListener("change", (e) => {
-  const file = e.target.files[0];
-  handleImportScriptFile(file);
-  e.target.value = "";
-});
-function triggerImportScript(){ $("#fileImportScript").click(); }
-$("#btnLandingImport").addEventListener("click", triggerImportScript);
-$("#btnLibraryImport").addEventListener("click", triggerImportScript);
-
-/* Backup export / import */
-$("#btnExportBackup").addEventListener("click", () => {
-  try{
-    const idx = Storage.loadIndex();
-    const scripts = idx.map(entry => Storage.loadScript(entry.id)).filter(Boolean);
-    const payload = { version:1, exportedAt: new Date().toISOString(), scripts };
-    const date = new Date().toISOString().slice(0,10);
-    if(download(`scriptino-backup-${date}.json`, JSON.stringify(payload, null, 2), "application/json")){
-      toast(`${scripts.length} Skripte als Backup exportiert.`);
-    } else {
-      toast("Backup-Export fehlgeschlagen.", "error");
-    }
-  }catch(e){ console.error(e); toast("Backup-Export fehlgeschlagen.", "error"); }
-});
-$("#btnImportBackup").addEventListener("click", () => $("#fileImportBackup").click());
-$("#fileImportBackup").addEventListener("change", async (e) => {
-  const file = e.target.files[0];
-  e.target.value = "";
-  if(!file) return;
-  try{
-    const text = await readFileAsText(file);
-    const parsed = JSON.parse(text);
-    if(!parsed || !Array.isArray(parsed.scripts)) throw new Error("invalid");
-    let count = 0;
-    parsed.scripts.forEach(s => {
-      if(!s || !Array.isArray(s.elements)) return;
-      const now = new Date().toISOString();
-      const script = {
-        version:1, id: uid("scr"),
-        title: s.title || "Importiertes Skript", author: s.author || "",
-        elements: s.elements.map(el => ({id: uid("el"), type: TYPE_ORDER.includes(el.type)?el.type:"action", html: sanitizeInline(el.html || escapeHTML(el.text||""))})),
-        settings: { titlePage: s.settings ? !!s.settings.titlePage : true, pageNumbers: s.settings ? !!s.settings.pageNumbers : true },
-        createdAt: s.createdAt || now, updatedAt: now
-      };
-      Storage.saveScript(script, estimatePageCount(script));
-      count++;
-    });
-    toast(`${count} Skripte aus Backup importiert.`);
-    renderLibrary();
-  }catch(e){
-    console.error(e);
-    toast("Diese Backup-Datei konnte nicht importiert werden.", "error");
-  }
-});
-
-/* --------------------------------------------------------------------
-   23. NEW SCRIPT
-   -------------------------------------------------------------------- */
-function createNewScript(){
-  const script = newEmptyScript("Unbenanntes Skript");
-  Storage.saveScript(script, 1);
-  goEditor(script.id);
-}
-$("#btnLandingNew").addEventListener("click", createNewScript);
-$("#btnLibraryNew").addEventListener("click", createNewScript);
-$("#btnEmptyNew").addEventListener("click", createNewScript);
-
-/* --------------------------------------------------------------------
-   24. NAVIGATION
-   -------------------------------------------------------------------- */
-$("#btnLandingLibrary").addEventListener("click", goLibrary);
-$("#btnBrandFromLibrary").addEventListener("click", goLanding);
-$("#btnBackToLibrary").addEventListener("click", () => {
-  repaginateDebounced.cancel();
-  if(App.currentScript) doSave(false);
-  exitFocusMode(true);
-  goLibrary();
-});
-
-/* --------------------------------------------------------------------
-   25. ICONS
-   -------------------------------------------------------------------- */
-function refreshIcons(){
-  try{ if(window.lucide) window.lucide.createIcons(); }catch(e){ /* noop */ }
-}
-
-/* --------------------------------------------------------------------
-   26. WINDOW RESIZE — repaginate (layout depends on px sizes only indirectly)
-   -------------------------------------------------------------------- */
-window.addEventListener("beforeunload", (e) => {
-  if(App.currentScript && !App.settings.autosave){
-    // Nutzer hat Autosave deaktiviert — Hinweis nur falls ungespeicherte Änderungen vermutet werden.
-  }
-});
-
-/* --------------------------------------------------------------------
-   27. INIT
-   -------------------------------------------------------------------- */
-function seedDemoIfNeeded(){
-  try{
-    if(localStorage.getItem(KEY_SEEDED)) return;
-    localStorage.setItem(KEY_SEEDED, "1");
-    if(Storage.loadIndex().length === 0){
-      const script = demoScript();
-      Storage.saveScript(script, estimatePageCount(script));
-    }
-  }catch(e){ /* localStorage evtl. blockiert */ }
-}
-
-function init(){
-  applyDarkMode();
-  seedDemoIfNeeded();
-  refreshIcons();
-  goLanding();
-
-  try{
-    if(!("localStorage" in window)){
-      toast("Dein Browser unterstützt keinen lokalen Speicher. Skripte können nicht gespeichert werden.", "error");
-    }
-  }catch(e){}
-}
-
-document.addEventListener("DOMContentLoaded", init);
-
-})();
+:root{
+  --ink: #1B1D23;
+  --ink-soft: #33363F;
+  --muted: #6B6F76;
+  --muted-2: #9A9D9F;
+  --bg: #ECEAE4;
+  --surface: #FFFFFF;
+  --surface-2: #F5F3ED;
+  --border: #DDD9CE;
+  --border-strong: #C9C4B6;
+  --accent: #9C6B12;
+  --accent-strong: #7C5309;
+  --accent-tint: #F1E6CF;
+  --page-highlight: #F1E6CF;
+  --page-highlight-border: #E3D3A8;
+  --danger: #B3402F;
+  --danger-tint: #F7E4DF;
+  --shadow-sm: 0 1px 2px rgba(27,29,35,0.06), 0 1px 1px rgba(27,29,35,0.04);
+  --shadow-md: 0 6px 20px rgba(27,29,35,0.10), 0 2px 6px rgba(27,29,35,0.06);
+  --shadow-page: 0 1px 1px rgba(20,20,20,.04), 0 8px 24px rgba(20,20,20,.10), 0 30px 60px -20px rgba(20,20,20,.18);
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 16px;
+  --font-ui: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-script: "Courier Prime", "Courier New", Courier, monospace;
+  --topbar-h: 58px;
+  --statusbar-h: 34px;
+}
+
+html.dark{
+  --ink: #ECE9E1;
+  --ink-soft: #C9C6BE;
+  --muted: #9AA0A8;
+  --muted-2: #767C84;
+  --bg: #131418;
+  --surface: #1B1D22;
+  --surface-2: #202329;
+  --border: #2C2F36;
+  --border-strong: #3A3E46;
+  --accent: #D2A544;
+  --accent-strong: #E7BE63;
+  --accent-tint: #33301F;
+  --danger: #E37860;
+  --danger-tint: #33221E;
+  --shadow-sm: 0 1px 2px rgba(0,0,0,0.3);
+  --shadow-md: 0 8px 24px rgba(0,0,0,0.45);
+  --shadow-page: 0 1px 1px rgba(0,0,0,.4), 0 10px 30px rgba(0,0,0,.5), 0 40px 80px -20px rgba(0,0,0,.6);
+}
+
+[hidden]{ display:none !important; }
+*{box-sizing:border-box;}
+html,body{height:100%;}
+body{
+  margin:0;
+  font-family:var(--font-ui);
+  background:var(--bg);
+  color:var(--ink);
+  -webkit-font-smoothing:antialiased;
+  text-rendering:optimizeLegibility;
+}
+button, input, select, textarea{ font-family:inherit; color:inherit; }
+button{ cursor:pointer; }
+*:focus-visible{ outline:2px solid var(--accent); outline-offset:2px; border-radius:4px; }
+
+/* ==========================================================================
+   Buttons / small controls
+   ========================================================================== */
+.btn{
+  display:inline-flex; align-items:center; gap:8px;
+  padding:10px 16px;
+  font-size:14px; font-weight:600;
+  border-radius:999px;
+  border:1px solid transparent;
+  background:var(--surface);
+  color:var(--ink);
+  transition:transform .12s ease, background .15s ease, border-color .15s ease;
+  white-space:nowrap;
+}
+.btn svg{ width:16px; height:16px; }
+.btn:hover{ transform:translateY(-1px); }
+.btn:active{ transform:translateY(0); }
+.btn-primary{ background:var(--ink); color:var(--surface); border-color:var(--ink); }
+html.dark .btn-primary{ background:var(--accent); color:#171200; border-color:var(--accent); }
+.btn-primary:hover{ background:var(--ink-soft); }
+.btn-ghost{ background:transparent; border-color:var(--border-strong); color:var(--ink); }
+.btn-ghost:hover{ background:var(--surface-2); }
+.btn-subtle{ background:transparent; border-color:transparent; color:var(--muted); padding:9px 10px; }
+.btn-subtle:hover{ background:var(--surface-2); color:var(--ink); }
+.btn-danger{ background:var(--danger); color:#fff; border-color:var(--danger); }
+.btn-danger:hover{ background:#96311F; }
+
+.icon-btn{
+  display:inline-flex; align-items:center; justify-content:center;
+  width:36px; height:36px;
+  border-radius:10px;
+  border:1px solid transparent;
+  background:transparent;
+  color:var(--ink-soft);
+}
+.icon-btn svg{ width:17px; height:17px; }
+.icon-btn:hover{ background:var(--surface-2); color:var(--ink); }
+.icon-btn.is-active{ background:var(--accent-tint); color:var(--accent-strong); }
+
+/* ==========================================================================
+   Views — simple show/hide router
+   ========================================================================== */
+.view{ display:none; min-height:100%; }
+.view.is-active{ display:flex; flex-direction:column; }
+body.route-landing #view-landing,
+body.route-library #view-library,
+body.route-editor #view-editor{ display:flex; }
+
+/* ==========================================================================
+   LANDING
+   ========================================================================== */
+.view-landing{
+  align-items:center; justify-content:center;
+  min-height:100vh;
+  padding:32px;
+  background:
+    radial-gradient(1200px 600px at 50% -10%, var(--accent-tint) 0%, transparent 60%),
+    var(--bg);
+}
+.landing-wrap{ max-width:460px; width:100%; text-align:center; }
+.landing-mark{
+  width:56px; height:56px; margin:0 auto 22px;
+  display:flex; align-items:center; justify-content:center;
+  color:var(--accent-strong);
+}
+.landing-title{
+  font-family:var(--font-ui);
+  font-size:44px; font-weight:700; letter-spacing:-0.03em;
+  margin:0 0 6px;
+  color:var(--ink);
+}
+.landing-tagline{
+  font-family:var(--font-script);
+  font-size:17px; color:var(--accent-strong); margin:0 0 18px;
+  letter-spacing:0.01em;
+}
+.landing-sub{ font-size:15px; color:var(--muted); margin:0 0 32px; line-height:1.5; }
+.landing-actions{ display:flex; gap:10px; justify-content:center; flex-wrap:wrap; }
+.landing-actions .btn{ padding:12px 20px; }
+.landing-library-link{
+  display:block; margin:22px auto 0; background:none; border:none;
+  color:var(--muted); font-size:14px; font-weight:500;
+  text-decoration:none; padding:6px;
+}
+.landing-library-link:hover{ color:var(--ink); }
+.landing-footnote{ margin:34px 0 0; font-size:12.5px; color:var(--muted-2); }
+.landing-meta-nav{ margin:14px 0 0; font-size:13px; }
+.landing-meta-nav a{ color:var(--muted); text-decoration:none; font-weight:500; }
+.landing-meta-nav a:hover{ color:var(--ink); text-decoration:underline; }
+.landing-meta-dot{ color:var(--muted-2); margin:0 8px; }
+
+/* ==========================================================================
+   LIBRARY
+   ========================================================================== */
+.view-library{ min-height:100vh; }
+.library-header{
+  display:flex; align-items:center; justify-content:space-between;
+  padding:16px 28px;
+  border-bottom:1px solid var(--border);
+  background:var(--surface);
+  position:sticky; top:0; z-index:5;
+  gap:16px; flex-wrap:wrap;
+}
+.brand-mini{
+  background:none; border:none; padding:4px 0;
+  font-size:18px; font-weight:700; letter-spacing:-0.02em; color:var(--ink);
+}
+.library-header-actions{ display:flex; align-items:center; gap:6px; }
+.library-body{ padding:36px 28px 80px; max-width:1180px; margin:0 auto; width:100%; }
+.library-title{ font-size:24px; font-weight:700; letter-spacing:-0.02em; margin:0 0 24px; }
+
+.library-grid{
+  display:grid; grid-template-columns:repeat(auto-fill, minmax(250px, 1fr));
+  gap:18px;
+}
+.script-card{
+  position:relative;
+  background:var(--surface);
+  border:1px solid var(--border);
+  border-radius:var(--radius-lg);
+  padding:22px 20px 18px;
+  cursor:pointer;
+  transition:box-shadow .18s ease, transform .18s ease, border-color .18s ease;
+  display:flex; flex-direction:column; min-height:168px;
+}
+.script-card:hover{ box-shadow:var(--shadow-md); transform:translateY(-3px); border-color:var(--border-strong); }
+.script-card:hover .script-card-menu-btn{ opacity:1; }
+.script-card-top{ display:flex; align-items:flex-start; justify-content:space-between; gap:8px; }
+.script-card-title{
+  font-size:15px; font-weight:700; letter-spacing:0.01em; text-transform:uppercase;
+  margin:0; line-height:1.3; word-break:break-word;
+}
+.script-card-tag{
+  display:inline-block; margin:9px 0 0; font-size:11px; font-weight:600;
+  letter-spacing:0.03em; color:var(--accent-strong); background:var(--accent-tint);
+  padding:3px 9px; border-radius:999px;
+}
+.script-card-author{ font-size:12.5px; color:var(--ink-soft); margin:12px 0 0; font-weight:500; }
+.script-card-menu-btn{ width:30px; height:30px; flex:none; opacity:0.55; transition:opacity .15s ease; }
+.script-card-menu-btn:hover, .script-card-menu-btn:focus-visible{ opacity:1; }
+.script-card-meta{ margin-top:auto; padding-top:16px; display:flex; flex-direction:column; gap:3px; }
+.script-card-pages{ font-size:12.5px; color:var(--ink-soft); font-weight:600; margin:0; }
+.script-card-edited{ font-size:12px; color:var(--muted-2); margin:0; }
+
+.card-menu{
+  position:absolute; top:44px; right:12px; z-index:10;
+  background:var(--surface); border:1px solid var(--border);
+  border-radius:var(--radius-sm); box-shadow:var(--shadow-md);
+  min-width:170px; overflow:hidden; padding:6px;
+}
+.card-menu button{
+  display:flex; align-items:center; gap:9px; width:100%;
+  background:none; border:none; text-align:left;
+  padding:9px 10px; font-size:13.5px; border-radius:6px; color:var(--ink);
+}
+.card-menu button svg{ width:15px; height:15px; color:var(--muted); }
+.card-menu button:hover{ background:var(--surface-2); }
+.card-menu button.danger{ color:var(--danger); }
+.card-menu button.danger svg{ color:var(--danger); }
+
+.library-empty{
+  display:flex; flex-direction:column; align-items:center; gap:6px;
+  padding:80px 20px; color:var(--muted); text-align:center;
+}
+.library-empty svg{ width:34px; height:34px; color:var(--muted-2); margin-bottom:8px; }
+.library-empty-title{ margin:0; font-size:16px; font-weight:700; color:var(--ink); }
+.library-empty-sub{ margin:0 0 14px; font-size:14px; color:var(--muted); }
+
+/* ==========================================================================
+   EDITOR — topbar
+   ========================================================================== */
+.view-editor{ min-height:100vh; }
+.editor-topbar{
+  display:flex; align-items:center; gap:14px;
+  height:var(--topbar-h); padding:0 14px;
+  background:var(--surface); border-bottom:1px solid var(--border);
+  position:sticky; top:0; z-index:20;
+}
+.topbar-left{ display:flex; align-items:center; gap:8px; min-width:0; flex:1 1 220px; }
+.topbar-title-wrap{ display:flex; flex-direction:column; min-width:0; }
+.topbar-title-input{
+  border:none; background:none; font-size:14.5px; font-weight:600;
+  padding:2px 6px; border-radius:6px; min-width:60px; max-width:280px; color:var(--ink);
+}
+.topbar-title-input:hover{ background:var(--surface-2); }
+.topbar-title-input:focus{ background:var(--surface-2); outline:none; }
+.topbar-save-state{ font-size:11px; color:var(--muted-2); padding:0 6px; }
+
+.topbar-toolbar{
+  display:flex; align-items:center; gap:6px;
+  flex:0 0 auto;
+  background:var(--surface-2);
+  border:1px solid var(--border);
+  padding:5px; border-radius:12px;
+}
+.element-select-wrap{ position:relative; }
+.element-select{
+  appearance:none; -webkit-appearance:none;
+  border:1px solid var(--border-strong); background:var(--surface);
+  border-radius:8px; padding:7px 30px 7px 12px;
+  font-size:13px; font-weight:600; color:var(--ink);
+  background-image:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='6'><path d='M0 0l5 6 5-6z' fill='%236B6F76'/></svg>");
+  background-repeat:no-repeat; background-position:right 11px center;
+}
+.toolbar-divider{ width:1px; height:20px; background:var(--border-strong); margin:0 2px; }
+.topbar-right{ display:flex; align-items:center; gap:4px; flex:0 0 auto; }
+
+.export-menu-wrap{ position:relative; }
+.export-menu{
+  position:absolute; top:44px; right:0; z-index:30;
+  background:var(--surface); border:1px solid var(--border);
+  border-radius:var(--radius-sm); box-shadow:var(--shadow-md);
+  min-width:210px; padding:6px;
+}
+.export-menu button{
+  display:flex; align-items:center; gap:9px; width:100%;
+  background:none; border:none; text-align:left;
+  padding:10px 10px; font-size:13.5px; border-radius:6px; color:var(--ink);
+}
+.export-menu button svg{ width:15px; height:15px; color:var(--muted); }
+.export-menu button:hover{ background:var(--surface-2); }
+
+/* ==========================================================================
+   EDITOR — stage & pages
+   ========================================================================== */
+.editor-stage{
+  flex:1; overflow-y:auto; overflow-x:auto; background:var(--bg);
+  padding:44px 20px 100px;
+  display:flex; flex-direction:column; align-items:center; gap:34px;
+}
+.pages-measure{ position:absolute; left:-9999px; top:0; visibility:hidden; pointer-events:none; }
+
+.pages-container{ display:flex; flex-direction:column; align-items:center; gap:34px; }
+
+.page-scale-wrap{ position:relative; flex:none; }
+.page{
+  background:#FFFFFF;
+  color:#151515;
+  box-shadow:var(--shadow-page);
+  position:absolute;
+  top:0; left:0;
+  flex:none;
+  font-family:var(--font-script);
+  width:var(--page-w, 816px);
+  height:var(--page-h, 1056px);
+  padding:var(--m-top, 96px) var(--m-right, 96px) var(--m-bottom, 96px) var(--m-left, 144px);
+  font-size:var(--font-pt, 12pt);
+  line-height:1.05;
+}
+.page.title-page{ display:flex; flex-direction:column; padding-left:0; padding-right:0; }
+.page-number{
+  position:absolute; top:calc(var(--m-top, 96px) - 46px); right:var(--m-right, 96px);
+  font-size:12px; color:#3a3a3a;
+}
+.page-content{ position:relative; width:100%; }
+
+.el.type-sceneheading,
+.el.type-action,
+.el.type-shot{ width:100%; margin:0 0 12pt; }
+.el.type-transition{ width:100%; margin:0 0 12pt; }
+.el.type-character{ width:auto; max-width:70%; margin:12pt 0 0 var(--ind-character, 2.2in); }
+.el.type-dialogue{ width:var(--w-dialogue, 3.4in); margin:0 0 12pt var(--ind-dialogue, 1in); }
+.el.type-parenthetical{ width:var(--w-parenthetical, 2in); margin:0 0 0 var(--ind-parenthetical, 1.6in); }
+
+.el{
+  outline:none;
+  white-space:pre-wrap;
+  word-wrap:break-word;
+  caret-color:var(--accent-strong);
+  min-height:1em;
+}
+.el:empty::before{ content:attr(data-placeholder); color:#B7B2A6; pointer-events:none; }
+.el.type-sceneheading{ text-transform:uppercase; font-weight:700; }
+.el.type-character{ text-transform:uppercase; }
+.el.type-transition{ text-transform:uppercase; text-align:right; }
+.el.type-shot{ text-transform:uppercase; }
+.el.type-parenthetical{ font-style:italic; }
+.el.is-focused{ background:var(--page-highlight); box-shadow:0 0 0 3px var(--page-highlight), inset 0 0 0 1px var(--page-highlight-border); border-radius:2px; }
+
+.char-suggest{
+  position:absolute; z-index:40;
+  background:var(--surface); border:1px solid var(--border);
+  border-radius:var(--radius-sm); box-shadow:var(--shadow-md);
+  min-width:140px; max-width:240px; overflow:hidden; padding:5px;
+  font-family:var(--font-ui);
+}
+.char-suggest-item{
+  display:flex; align-items:center; gap:8px; width:100%;
+  background:none; border:none; text-align:left; cursor:pointer;
+  padding:7px 9px; font-size:12.5px; font-weight:600; letter-spacing:0.01em;
+  border-radius:6px; color:var(--ink); font-family:var(--font-script);
+}
+.char-suggest-item:hover{ background:var(--surface-2); }
+.char-suggest-item.active{ background:var(--accent-tint); color:var(--accent-strong); }
+.char-suggest-hint{
+  font-family:var(--font-ui); font-size:10.5px; color:var(--muted-2);
+  padding:5px 9px 2px; letter-spacing:0.01em;
+}
+
+.title-page-fields{
+  flex:1; display:flex; flex-direction:column; align-items:center; justify-content:center;
+  text-align:center; gap:6px; padding:0 60px;
+}
+.title-page-title{ font-size:15pt; font-weight:700; text-transform:uppercase; letter-spacing:0.03em; }
+.title-page-by{ margin-top:38px; font-size:12pt; }
+.title-page-author{ margin-top:38px; font-size:12pt; }
+
+/* ==========================================================================
+   EDITOR — status bar
+   ========================================================================== */
+.editor-statusbar{
+  position:fixed; left:0; right:0; bottom:0; z-index:20;
+  height:var(--statusbar-h); flex:none;
+  display:flex; align-items:center; justify-content:space-between; gap:8px;
+  padding:0 16px; font-size:12px; color:var(--muted);
+  background:var(--surface); border-top:1px solid var(--border);
+}
+.statusbar-left{ display:flex; align-items:center; gap:8px; min-width:0; }
+.statusbar-dot{ color:var(--muted-2); }
+
+.zoom-controls{
+  display:flex; align-items:center; gap:2px; flex:none;
+  background:var(--surface-2); border:1px solid var(--border); border-radius:999px;
+  padding:2px;
+}
+.zoom-btn{
+  width:20px; height:20px; display:flex; align-items:center; justify-content:center;
+  background:none; border:none; border-radius:999px; color:var(--ink-soft);
+  font-size:13px; line-height:1; font-weight:600;
+}
+.zoom-btn:hover{ background:var(--surface); color:var(--ink); }
+.zoom-btn:disabled{ opacity:0.35; cursor:default; }
+.zoom-btn:disabled:hover{ background:none; }
+.zoom-level{
+  background:none; border:none; color:var(--muted); font-size:11.5px; font-weight:600;
+  padding:0 8px; min-width:40px; text-align:center;
+}
+.zoom-level:hover{ color:var(--ink); }
+
+/* ==========================================================================
+   FOCUS MODE
+   ========================================================================== */
+body.focus-mode .editor-topbar{ opacity:0; pointer-events:none; transform:translateY(-8px); }
+body.focus-mode .editor-statusbar{ opacity:0.35; }
+body.focus-mode .editor-stage{ padding-top:80px; }
+.editor-topbar, .editor-statusbar{ transition:opacity .25s ease, transform .25s ease; }
+.focus-exit-hint{
+  position:fixed; top:16px; left:50%; transform:translateX(-50%);
+  background:var(--ink); color:var(--surface); font-size:12px; font-weight:600;
+  padding:7px 14px; border-radius:999px; z-index:50; opacity:0; pointer-events:none;
+  transition:opacity .2s ease;
+}
+body.focus-mode .focus-exit-hint.show{ opacity:0.9; }
+
+/* ==========================================================================
+   MODALS
+   ========================================================================== */
+.modal-overlay{
+  position:fixed; inset:0; background:rgba(20,18,14,0.42);
+  display:flex; align-items:center; justify-content:center;
+  z-index:100; padding:20px; backdrop-filter:blur(2px);
+}
+.modal-overlay[hidden]{ display:none !important; }
+.modal{
+  background:var(--surface); border-radius:var(--radius-lg);
+  width:100%; max-width:440px; box-shadow:var(--shadow-md);
+  border:1px solid var(--border);
+  max-height:88vh; display:flex; flex-direction:column;
+}
+.modal-small{ max-width:380px; }
+.modal-head{
+  display:flex; align-items:center; justify-content:space-between;
+  padding:18px 20px 6px;
+}
+.modal-head h3{ margin:0; font-size:16px; font-weight:700; }
+.modal-body{ padding:16px 20px 6px; overflow-y:auto; }
+.modal-foot{ padding:16px 20px 20px; display:flex; justify-content:flex-end; gap:10px; }
+
+.settings-row{
+  display:flex; align-items:center; justify-content:space-between; gap:16px;
+  padding:14px 0; border-bottom:1px solid var(--border);
+}
+.settings-row:last-of-type{ border-bottom:none; }
+.settings-row label{ font-size:14px; font-weight:600; }
+.settings-hint{ margin:3px 0 0; font-size:12.5px; color:var(--muted); line-height:1.4; }
+.settings-select{
+  border:1px solid var(--border-strong); background:var(--surface);
+  border-radius:8px; padding:8px 10px; font-size:13px; font-weight:600;
+}
+.settings-divider{ height:1px; background:var(--border); margin:6px 0; }
+.settings-danger-row label{ color:var(--danger); }
+.settings-privacy-note{
+  display:flex; align-items:flex-start; gap:8px;
+  font-size:12.5px; color:var(--muted); line-height:1.5;
+  background:var(--surface-2); border-radius:10px; padding:12px 14px; margin:16px 0 4px;
+}
+.settings-privacy-note svg{ width:16px; height:16px; flex:none; margin-top:1px; color:var(--accent-strong); }
+
+.switch{ position:relative; display:inline-block; width:40px; height:24px; flex:none; }
+.switch input{ opacity:0; width:0; height:0; }
+.switch-track{
+  position:absolute; inset:0; background:var(--border-strong); border-radius:999px;
+  transition:background .15s ease; cursor:pointer;
+}
+.switch-track::before{
+  content:""; position:absolute; width:18px; height:18px; left:3px; top:3px;
+  background:#fff; border-radius:50%; transition:transform .15s ease; box-shadow:0 1px 2px rgba(0,0,0,.3);
+}
+.switch input:checked + .switch-track{ background:var(--accent); }
+.switch input:checked + .switch-track::before{ transform:translateX(16px); }
+
+.field{ margin-bottom:14px; }
+.field label{ display:block; font-size:12.5px; font-weight:600; color:var(--muted); margin-bottom:6px; }
+.field input[type=text]{
+  width:100%; border:1px solid var(--border-strong); background:var(--surface);
+  border-radius:8px; padding:10px 12px; font-size:14px;
+}
+
+.radio-row{
+  display:flex; align-items:center; gap:10px; cursor:pointer;
+  padding:11px 4px; border-bottom:1px solid var(--border);
+}
+.radio-row:last-of-type{ border-bottom:none; }
+.radio-row input{ position:absolute; opacity:0; width:0; height:0; }
+.radio-dot{
+  width:18px; height:18px; flex:none; border-radius:50%;
+  border:1.5px solid var(--border-strong); background:var(--surface);
+  position:relative; transition:border-color .15s ease;
+}
+.radio-dot::before{
+  content:""; position:absolute; inset:3px; border-radius:50%;
+  background:var(--accent); transform:scale(0); transition:transform .15s ease;
+}
+.radio-row input:checked + .radio-dot{ border-color:var(--accent); }
+.radio-row input:checked + .radio-dot::before{ transform:scale(1); }
+.radio-label{ font-size:14px; font-weight:600; }
+
+.pdf-character-options{ padding:12px 4px 2px 32px; }
+.pdf-character-select{ width:100%; }
+.pdf-color-field{ display:flex; align-items:center; gap:10px; margin-bottom:2px; }
+.pdf-color-field label{ margin-bottom:0; }
+.pdf-color-field input[type=color]{
+  width:40px; height:32px; border:1px solid var(--border-strong); border-radius:8px;
+  padding:2px; background:var(--surface); cursor:pointer;
+}
+.pdf-no-characters-hint{
+  font-size:12.5px; color:var(--muted); padding:8px 4px 2px 32px; margin:0;
+}
+
+.confirm-title{ font-size:16px; font-weight:700; margin:4px 0 8px; }
+.confirm-body{ font-size:13.5px; color:var(--muted); line-height:1.55; margin:0; }
+
+/* ==========================================================================
+   TOASTS / STATUS
+   ========================================================================== */
+.save-status{ display:none; }
+.toast-host{
+  position:fixed; bottom:20px; left:50%; transform:translateX(-50%);
+  display:flex; flex-direction:column; gap:8px; z-index:200; align-items:center;
+}
+.toast{
+  background:var(--ink); color:var(--surface);
+  font-size:13px; font-weight:500; padding:10px 16px; border-radius:999px;
+  box-shadow:var(--shadow-md); opacity:0; transform:translateY(6px);
+  transition:opacity .18s ease, transform .18s ease;
+}
+.toast.show{ opacity:1; transform:translateY(0); }
+.toast.toast-error{ background:var(--danger); }
+
+/* ==========================================================================
+   RESPONSIVE
+   ========================================================================== */
+@media (max-width: 860px){
+  .editor-topbar{ flex-wrap:wrap; height:auto; padding:8px 10px; gap:8px; }
+  .topbar-toolbar{ order:3; width:100%; justify-content:space-between; }
+  .topbar-left{ flex:1 1 auto; }
+  .library-header{ padding:14px 16px; }
+  .library-header-actions{ flex-wrap:wrap; justify-content:flex-end; row-gap:8px; }
+  .library-body{ padding:24px 16px 60px; }
+  .editor-stage{ padding:24px 10px 90px; }
+}
+@media (max-width: 460px){
+  .library-header{ flex-direction:column; align-items:flex-start; }
+  .library-header-actions{ width:100%; justify-content:flex-start; }
+}
+@media (max-width: 520px){
+  .landing-title{ font-size:34px; }
+  .library-grid{ grid-template-columns:1fr 1fr; }
+  .topbar-title-input{ max-width:140px; }
+}
+@media (max-width: 380px){
+  .library-grid{ grid-template-columns:1fr; }
+}
+
+/* ==========================================================================
+   PRINT
+   ========================================================================== */
+@media print{
+  body *{ visibility:hidden; }
+  .pages-container, .pages-container *{ visibility:visible; }
+  .pages-container{ position:absolute; left:0; top:0; gap:0; }
+  .page-scale-wrap{ position:static !important; width:auto !important; height:auto !important; }
+  .page{ position:static !important; transform:none !important; box-shadow:none; margin:0 auto; page-break-after:always; }
+  .el.is-focused{ background:none; box-shadow:none; }
+}
+
+/* Reduced motion */
+@media (prefers-reduced-motion: reduce){
+  *{ transition:none !important; animation:none !important; }
+}
+
+/* ==========================================================================
+   SUBPAGES — help.html / about.html
+   Nutzen dieselbe Schrift, Farbwelt und Dark-Mode-Logik wie der Editor.
+   ========================================================================== */
+body.subpage-body{ background:var(--bg); min-height:100vh; }
+
+.subpage-header{
+  display:flex; align-items:center; justify-content:space-between;
+  padding:16px 28px; border-bottom:1px solid var(--border);
+  background:var(--surface); position:sticky; top:0; z-index:5; gap:16px;
+}
+.subpage-brand{
+  display:flex; align-items:center; gap:8px; text-decoration:none;
+  font-size:18px; font-weight:700; letter-spacing:-0.02em; color:var(--ink);
+}
+.subpage-brand svg{ color:var(--accent-strong); }
+.subpage-back{
+  display:inline-flex; align-items:center; gap:6px;
+  font-size:13.5px; font-weight:600; color:var(--muted); text-decoration:none;
+  padding:8px 14px; border-radius:999px; border:1px solid var(--border-strong);
+}
+.subpage-back:hover{ background:var(--surface-2); color:var(--ink); }
+.subpage-back svg{ width:15px; height:15px; }
+
+.subpage-main{ max-width:760px; margin:0 auto; padding:56px 28px 100px; }
+.subpage-hero{ text-align:center; margin-bottom:56px; }
+.subpage-hero h1{ font-size:38px; font-weight:700; letter-spacing:-0.02em; margin:0 0 10px; color:var(--ink); }
+.subpage-hero p{ font-size:16px; color:var(--muted); margin:0; }
+
+.subpage-section{ margin-bottom:48px; }
+.subpage-section h2{
+  font-size:22px; font-weight:700; letter-spacing:-0.01em; margin:0 0 16px; color:var(--ink);
+  scroll-margin-top:90px;
+}
+.subpage-section h3{ font-size:16px; font-weight:700; margin:22px 0 8px; color:var(--ink); }
+.subpage-section p{ font-size:15px; line-height:1.7; color:var(--ink-soft); margin:0 0 14px; }
+.subpage-section ul{ margin:0 0 14px; padding-left:22px; }
+.subpage-section li{ font-size:15px; line-height:1.75; color:var(--ink-soft); margin-bottom:4px; }
+.subpage-section strong{ color:var(--ink); }
+
+.element-example-grid{
+  display:grid; grid-template-columns:repeat(auto-fill, minmax(280px, 1fr));
+  gap:14px; margin:0 0 8px;
+}
+.element-example-card{
+  background:var(--surface); border:1px solid var(--border); border-radius:var(--radius-md);
+  padding:16px 18px;
+}
+.element-example-card h4{ font-size:13px; font-weight:700; margin:0 0 8px; color:var(--accent-strong); text-transform:uppercase; letter-spacing:0.03em; }
+.element-example-card code{
+  display:block; font-family:var(--font-script); font-size:13px; background:var(--surface-2);
+  border-radius:6px; padding:10px 12px; color:var(--ink); white-space:pre-wrap; line-height:1.5;
+}
+
+.shortcut-table{ width:100%; border-collapse:collapse; font-size:14px; }
+.shortcut-table th{
+  text-align:left; font-size:12px; font-weight:700; text-transform:uppercase; letter-spacing:0.03em;
+  color:var(--muted); padding:0 0 10px; border-bottom:1px solid var(--border-strong);
+}
+.shortcut-table td{ padding:11px 0; border-bottom:1px solid var(--border); color:var(--ink-soft); vertical-align:top; }
+.shortcut-table td:first-child{ width:42%; }
+.shortcut-table kbd{
+  display:inline-block; font-family:var(--font-ui); font-size:12.5px; font-weight:600; color:var(--ink);
+  background:var(--surface-2); border:1px solid var(--border-strong); border-bottom-width:2px;
+  border-radius:6px; padding:3px 8px; margin:2px 3px 2px 0;
+}
+
+.faq-list{ display:flex; flex-direction:column; gap:8px; }
+.faq-item{ border:1px solid var(--border); border-radius:var(--radius-md); background:var(--surface); overflow:hidden; }
+.faq-question{
+  width:100%; display:flex; align-items:center; justify-content:space-between; gap:12px;
+  padding:15px 18px; background:none; border:none; text-align:left;
+  font-size:14.5px; font-weight:600; color:var(--ink); cursor:pointer;
+}
+.faq-question:hover{ background:var(--surface-2); }
+.faq-question .faq-icon{ flex:none; width:18px; height:18px; color:var(--muted); transition:transform .2s ease; }
+.faq-item.open .faq-question .faq-icon{ transform:rotate(45deg); }
+.faq-answer{
+  max-height:0; overflow:hidden; transition:max-height .25s ease, padding .25s ease;
+  padding:0 18px; font-size:14px; line-height:1.65; color:var(--muted);
+}
+.faq-item.open .faq-answer{ max-height:240px; padding:0 18px 16px; }
+.faq-answer a{ color:var(--accent-strong); }
+
+.contact-row{ display:flex; flex-wrap:wrap; gap:10px; margin-top:6px; }
+.contact-link{
+  display:inline-flex; align-items:center; gap:8px;
+  padding:10px 16px; border-radius:999px; border:1px solid var(--border-strong);
+  background:var(--surface); color:var(--ink); text-decoration:none; font-size:13.5px; font-weight:600;
+}
+.contact-link:hover{ background:var(--surface-2); }
+.contact-link svg{ width:15px; height:15px; color:var(--muted); }
+
+.about-photo-frame{
+  width:100%; aspect-ratio:4/3; border-radius:var(--radius-lg); overflow:hidden;
+  background:var(--surface-2); border:1px solid var(--border);
+  display:flex; align-items:center; justify-content:center; margin-bottom:40px;
+}
+.about-photo-frame img{ width:100%; height:100%; object-fit:cover; display:none; }
+.about-photo-placeholder{ display:flex; flex-direction:column; align-items:center; gap:8px; color:var(--muted-2); }
+.about-photo-placeholder svg{ width:32px; height:32px; }
+.about-photo-placeholder span{ font-size:12.5px; }
+
+@media (max-width: 700px){
+  .subpage-header{ padding:14px 16px; }
+  .subpage-main{ padding:40px 18px 80px; }
+  .subpage-hero h1{ font-size:30px; }
+  .shortcut-table td:first-child{ width:auto; }
+}
