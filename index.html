@@ -1,0 +1,563 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<script>
+// Dark Mode synchron VOR dem ersten Rendern anwenden, damit die Seite nicht kurz hell aufblitzt.
+try{
+  var __s = localStorage.getItem("scriptino_settings_v1");
+  var __settings = __s ? JSON.parse(__s) : null;
+  if(__settings && __settings.darkMode) document.documentElement.classList.add("dark");
+}catch(e){ /* localStorage evtl. blockiert */ }
+</script>
+<title>Scriptino — Write the story.</title>
+<meta name="description" content="Scriptino ist ein kostenloser Online-Editor für professionelle Filmskripte. Kein Account, keine Paywall — deine Daten bleiben auf deinem Gerät.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Courier+Prime:ital,wght@0,400;0,700;1,400&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<!-- ============ TOAST / STATUS ============ -->
+<div id="saveStatus" class="save-status" aria-live="polite"></div>
+<div id="toastHost" class="toast-host" aria-live="polite"></div>
+
+<!-- ============ GLOBAL NAVBAR (liquid glass) — hidden in editor route ============ -->
+<header class="app-navbar" id="appNavbar">
+  <button class="app-navbar-brand" id="btnNavBrand" type="button" aria-label="Scriptino — Startseite">
+    <svg width="20" height="20" viewBox="0 0 34 34" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+      <rect x="1" y="1" width="32" height="32" rx="7" stroke="currentColor" stroke-width="1.8"/>
+      <path d="M9 12h9M9 17h16M9 22h13" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+    </svg>
+    <span>Scriptino</span>
+  </button>
+  <nav class="app-navbar-links" aria-label="Hauptnavigation">
+    <button type="button" class="navbar-link" id="btnNavLibrary" data-i18n="nav.library">Meine Skripte</button>
+    <button type="button" class="navbar-link" id="btnNavHelp" data-i18n="nav.help">Hilfe</button>
+    <button type="button" class="navbar-link" id="btnNavAbout" data-i18n="nav.about">Über uns</button>
+  </nav>
+  <div class="app-navbar-right">
+    <div class="lang-switch" id="langSwitch" role="group" aria-label="Sprache">
+      <button type="button" class="lang-btn" id="btnLangDe" data-lang="de">DE</button>
+      <button type="button" class="lang-btn" id="btnLangEn" data-lang="en">EN</button>
+    </div>
+  </div>
+</header>
+
+<!-- ============ VIEW: LANDING ============ -->
+<section id="view-landing" class="view view-landing">
+  <div class="landing-wrap">
+    <div class="landing-mark" aria-hidden="true">
+      <svg width="34" height="34" viewBox="0 0 34 34" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <rect x="1" y="1" width="32" height="32" rx="7" stroke="currentColor" stroke-width="1.6"/>
+        <path d="M9 12h9M9 17h16M9 22h13" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
+      </svg>
+    </div>
+    <h1 class="landing-title">scriptino</h1>
+    <p class="landing-tagline" data-i18n="landing.tagline">Write the story.</p>
+    <p class="landing-sub" data-i18n="landing.sub">Ein einfacher Editor für professionelle Drehbücher.</p>
+
+    <div class="landing-actions">
+      <button class="btn btn-primary" id="btnLandingNew" type="button">
+        <i data-lucide="plus"></i> <span data-i18n="landing.newScript">Neues Skript</span>
+      </button>
+      <button class="btn btn-ghost" id="btnLandingImport" type="button">
+        <i data-lucide="upload"></i> <span data-i18n="landing.import">Skript importieren</span>
+      </button>
+    </div>
+
+    <button class="landing-library-link" id="btnLandingLibrary" type="button" data-i18n="landing.viewLibrary">Meine Skripte ansehen →</button>
+
+    <p class="landing-footnote" data-i18n="landing.footnote">Kostenlos · Kein Account · Deine Daten bleiben auf deinem Gerät</p>
+  </div>
+</section>
+
+<!-- ============ VIEW: LIBRARY ============ -->
+<section id="view-library" class="view view-library">
+  <div class="library-header">
+    <h2 class="library-title" data-i18n="library.title">Meine Skripte</h2>
+    <div class="library-header-actions">
+      <button class="btn btn-subtle" id="btnOpenSettings" type="button" data-i18n-title="library.settings" title="Einstellungen">
+        <i data-lucide="settings-2"></i>
+      </button>
+      <button class="btn btn-subtle" id="btnImportBackup" type="button" data-i18n-title="library.importBackup" title="Backup importieren">
+        <i data-lucide="database-backup"></i>
+      </button>
+      <button class="btn btn-subtle" id="btnExportBackup" type="button" data-i18n-title="library.exportBackup" title="Alle Skripte exportieren">
+        <i data-lucide="archive"></i>
+      </button>
+      <button class="btn btn-ghost" id="btnLibraryImport" type="button">
+        <i data-lucide="upload"></i> <span data-i18n="library.import">Importieren</span>
+      </button>
+      <button class="btn btn-primary" id="btnLibraryNew" type="button">
+        <i data-lucide="plus"></i> <span data-i18n="library.newScript">Neues Skript</span>
+      </button>
+    </div>
+  </div>
+
+  <div class="library-body">
+    <div id="libraryEmpty" class="library-empty" hidden>
+      <i data-lucide="film"></i>
+      <p class="library-empty-title" data-i18n="library.empty.title">Keine Skripte vorhanden</p>
+      <p class="library-empty-sub" data-i18n="library.empty.sub">Beginne mit deiner ersten Geschichte.</p>
+      <button class="btn btn-primary" id="btnEmptyNew" type="button"><i data-lucide="plus"></i> <span data-i18n="library.newScript">Neues Skript</span></button>
+    </div>
+
+    <div id="favoritesSection" class="library-subsection" hidden>
+      <h3 class="library-subtitle" data-i18n="library.favorites">Favoriten</h3>
+      <div id="favoritesGrid" class="library-grid"></div>
+    </div>
+
+    <div id="scriptsSection" class="library-subsection" hidden>
+      <h3 class="library-subtitle" id="scriptsSectionTitle" data-i18n="library.myScripts">Meine Skripte</h3>
+      <div id="libraryGrid" class="library-grid"></div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ VIEW: HELP ============ -->
+<section id="view-help" class="view view-help">
+  <main class="subpage-main">
+    <div class="subpage-hero">
+      <h1 data-i18n="help.title">Hilfe</h1>
+      <p data-i18n="help.subtitle">Alles, was du über Scriptino wissen musst.</p>
+    </div>
+
+    <section class="subpage-section">
+      <h2 data-i18n="help.whatIs.h">Was ist Scriptino?</h2>
+      <p data-i18n="help.whatIs.p1">Scriptino ist ein kostenloser Drehbuch-Editor, mit dem du Filmskripte professionell formatieren, schreiben, speichern und als PDF exportieren kannst.</p>
+      <p data-i18n="help.whatIs.p2">Deine Skripte werden ausschließlich lokal auf deinem Gerät gespeichert. Es ist kein Account und keine Registrierung erforderlich — du öffnest Scriptino und kannst sofort loslegen.</p>
+    </section>
+
+    <section class="subpage-section">
+      <h2 data-i18n="help.start.h">Erste Schritte</h2>
+      <ul>
+        <li><strong data-i18n="help.start.li1.b">Neues Skript erstellen</strong> <span data-i18n="help.start.li1.t">— auf der Startseite oder in „Meine Skripte“ über den Button „+ Neues Skript“.</span></li>
+        <li><strong data-i18n="help.start.li2.b">Titel und Autor einstellen</strong> <span data-i18n="help.start.li2.t">— über das Einstellungs-Symbol im Editor (Skript-Einstellungen).</span></li>
+        <li><strong data-i18n="help.start.li3.b">Drehbuch schreiben</strong> <span data-i18n="help.start.li3.t">— direkt in die Seite tippen, Scriptino formatiert automatisch mit.</span></li>
+        <li><strong data-i18n="help.start.li4.b">Elementtypen verwenden</strong> <span data-i18n="help.start.li4.t">— über das Dropdown in der Toolbar oder mit TAB durchschalten.</span></li>
+        <li><strong data-i18n="help.start.li5.b">Speichern</strong> <span data-i18n="help.start.li5.t">— passiert automatisch (Autosave), oder manuell mit</span> <kbd>Strg/Cmd</kbd> + <kbd>S</kbd>.</li>
+        <li><strong data-i18n="help.start.li6.b">PDF exportieren</strong> <span data-i18n="help.start.li6.t">— über das Download-Symbol in der Toolbar.</span></li>
+        <li><strong data-i18n="help.start.li7.b">Skript exportieren/importieren</strong> <span data-i18n="help.start.li7.t">— als .scriptino-Datei, um es zu sichern oder auf einem anderen Gerät weiterzuschreiben.</span></li>
+      </ul>
+    </section>
+
+    <section class="subpage-section">
+      <h2 data-i18n="help.elements.h">Drehbuch-Elemente</h2>
+      <p data-i18n="help.elements.p">Scriptino unterstützt alle klassischen Screenplay-Elemente:</p>
+      <div class="element-example-grid">
+        <div class="element-example-card"><h4 data-i18n="help.el.sceneheading">Scene Heading</h4><code>INT. WOHNZIMMER – NACHT</code></div>
+        <div class="element-example-card"><h4 data-i18n="help.el.action">Action</h4><code data-i18n="help.el.action.ex">Julius geht langsam durch den Flur.</code></div>
+        <div class="element-example-card"><h4 data-i18n="help.el.character">Character</h4><code>JULIUS</code></div>
+        <div class="element-example-card"><h4 data-i18n="help.el.dialogue">Dialogue</h4><code data-i18n="help.el.dialogue.ex">Ich glaube, wir sollten gehen.</code></div>
+        <div class="element-example-card"><h4 data-i18n="help.el.parenthetical">Parenthetical</h4><code data-i18n="help.el.parenthetical.ex">(leise)</code></div>
+        <div class="element-example-card"><h4 data-i18n="help.el.transition">Transition</h4><code>CUT TO:</code></div>
+        <div class="element-example-card"><h4 data-i18n="help.el.shot">Shot</h4><code>CLOSE ON:</code></div>
+      </div>
+    </section>
+
+    <section class="subpage-section">
+      <h2 data-i18n="help.shortcuts.h">Tastenkürzel</h2>
+      <table class="shortcut-table">
+        <thead><tr><th data-i18n="help.shortcuts.col1">Kürzel</th><th data-i18n="help.shortcuts.col2">Funktion</th></tr></thead>
+        <tbody>
+          <tr><td><kbd>Strg/Cmd</kbd> + <kbd>S</kbd></td><td data-i18n="help.shortcuts.save">Speichern</td></tr>
+          <tr><td><kbd>Strg/Cmd</kbd> + <kbd>Z</kbd></td><td data-i18n="help.shortcuts.undo">Rückgängig</td></tr>
+          <tr><td><kbd>Strg/Cmd</kbd> + <kbd>Shift</kbd> + <kbd>Z</kbd></td><td data-i18n="help.shortcuts.redo">Wiederholen</td></tr>
+          <tr><td><kbd>Strg/Cmd</kbd> + <kbd>P</kbd></td><td data-i18n="help.shortcuts.print">Drucken</td></tr>
+          <tr><td><kbd>Strg/Cmd</kbd> + <kbd>E</kbd></td><td data-i18n="help.shortcuts.pdf">PDF exportieren</td></tr>
+          <tr><td><kbd>Tab</kbd></td><td data-i18n="help.shortcuts.tab">Nächstes Element / Vorschlag übernehmen</td></tr>
+          <tr><td><kbd>Shift</kbd> + <kbd>Tab</kbd></td><td data-i18n="help.shortcuts.shifttab">Vorheriges Element</td></tr>
+          <tr><td><kbd>Esc</kbd></td><td data-i18n="help.shortcuts.esc">Fokusmodus verlassen / Vorschläge schließen</td></tr>
+          <tr><td><kbd>↑</kbd> / <kbd>↓</kbd></td><td data-i18n="help.shortcuts.arrows">Navigation zwischen Elementen</td></tr>
+          <tr><td><kbd>Strg</kbd> + Mausrad</td><td data-i18n="help.shortcuts.zoom">Dokument zoomen</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section class="subpage-section">
+      <h2 data-i18n="help.suggest.h">Character-Vorschläge</h2>
+      <p data-i18n="help.suggest.p">Scriptino erkennt automatisch alle Charaktere, die bereits in deinem Skript vorkommen. Existiert zum Beispiel schon TOM, genügt es, bei einem neuen Character-Element den Anfang einzutippen — Scriptino schlägt den passenden Namen vor. Mit Tab übernimmst du den Vorschlag.</p>
+    </section>
+
+    <section class="subpage-section">
+      <h2 data-i18n="help.actor.h">Schauspieler-PDF</h2>
+      <p data-i18n="help.actor.p">Beim PDF-Export kannst du optional einen Charakter auswählen. Scriptino hebt dann automatisch dessen Dialog farblich hervor, sodass ein Schauspieler seine eigenen Zeilen auf einen Blick findet.</p>
+    </section>
+
+    <section class="subpage-section">
+      <h2 data-i18n="help.autosave.h">Autosave</h2>
+      <p data-i18n="help.autosave.p">Scriptino speichert automatisch während des Schreibens — lokal auf deinem Gerät. Du musst dich um nichts kümmern; ein kleiner Hinweis in der Statusleiste zeigt dir den Speicherstatus.</p>
+    </section>
+
+    <section class="subpage-section">
+      <h2 data-i18n="help.io.h">Import / Export</h2>
+      <p data-i18n="help.io.p">Jedes Skript lässt sich als eigene .scriptino-Datei exportieren — ein einfaches, textbasiertes Format, das dein gesamtes Skript inklusive Formatierung enthält. Über „Skript importieren“ kannst du eine solche Datei (oder eine .txt-Datei) wieder öffnen, etwa auf einem anderen Computer.</p>
+    </section>
+
+    <section class="subpage-section">
+      <h2 data-i18n="help.faq.h">FAQ</h2>
+      <div class="faq-list" id="faqList">
+        <div class="faq-item">
+          <button class="faq-question" type="button"><span data-i18n="help.faq.q1">Muss ich einen Account erstellen?</span><i data-lucide="plus" class="faq-icon"></i></button>
+          <div class="faq-answer"><p data-i18n="help.faq.a1">Nein. Scriptino funktioniert vollständig ohne Account.</p></div>
+        </div>
+        <div class="faq-item">
+          <button class="faq-question" type="button"><span data-i18n="help.faq.q2">Wo werden meine Skripte gespeichert?</span><i data-lucide="plus" class="faq-icon"></i></button>
+          <div class="faq-answer"><p data-i18n="help.faq.a2">Die Skripte werden lokal auf deinem Gerät gespeichert.</p></div>
+        </div>
+        <div class="faq-item">
+          <button class="faq-question" type="button"><span data-i18n="help.faq.q3">Kann ich meine Skripte auf einem anderen Computer öffnen?</span><i data-lucide="plus" class="faq-icon"></i></button>
+          <div class="faq-answer"><p data-i18n="help.faq.a3">Ja. Exportiere dein Skript als .scriptino-Datei und importiere es auf dem anderen Gerät.</p></div>
+        </div>
+        <div class="faq-item">
+          <button class="faq-question" type="button"><span data-i18n="help.faq.q4">Kann ich mein Skript als PDF speichern?</span><i data-lucide="plus" class="faq-icon"></i></button>
+          <div class="faq-answer"><p data-i18n="help.faq.a4">Ja, jederzeit über das Download-Symbol in der Toolbar oder mit Strg/Cmd + E.</p></div>
+        </div>
+        <div class="faq-item">
+          <button class="faq-question" type="button"><span data-i18n="help.faq.q5">Kann ich ein Skript für einen bestimmten Schauspieler exportieren?</span><i data-lucide="plus" class="faq-icon"></i></button>
+          <div class="faq-answer"><p data-i18n="help.faq.a5">Ja. Beim PDF-Export kann ein Charakter ausgewählt werden, dessen Dialog dann farblich hervorgehoben wird.</p></div>
+        </div>
+        <div class="faq-item">
+          <button class="faq-question" type="button"><span data-i18n="help.faq.q6">Ist Scriptino kostenlos?</span><i data-lucide="plus" class="faq-icon"></i></button>
+          <div class="faq-answer"><p data-i18n="help.faq.a6">Ja, vollständig und ohne versteckte Kosten.</p></div>
+        </div>
+        <div class="faq-item">
+          <button class="faq-question" type="button"><span data-i18n="help.faq.q7">Kann ich Scriptino ohne Internet verwenden?</span><i data-lucide="plus" class="faq-icon"></i></button>
+          <div class="faq-answer"><p data-i18n="help.faq.a7">Das Schreiben, Speichern und Bearbeiten funktioniert vollständig offline. Für Icons und den PDF-Export lädt Scriptino beim ersten Öffnen kleine Bibliotheken über eine CDN — dafür ist einmalig eine Internetverbindung nötig.</p></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="subpage-section">
+      <h2 data-i18n="contact.h">Noch Fragen?</h2>
+      <p data-i18n="contact.p">Wenn du Fragen, Probleme oder Verbesserungsvorschläge hast, kannst du dich gerne melden.</p>
+      <div class="contact-row">
+        <a class="contact-link" href="mailto:einsjulius@gmail.com"><i data-lucide="mail"></i> einsjulius@gmail.com</a>
+        <a class="contact-link" href="https://instagram.com/einsjulius" target="_blank" rel="noopener">
+          <svg class="ig-icon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <rect x="2" y="2" width="20" height="20" rx="5" ry="5"></rect>
+            <path d="M16 11.37A4 4 0 1 1 12.63 8 4 4 0 0 1 16 11.37z"></path>
+            <line x1="17.5" y1="6.5" x2="17.51" y2="6.5"></line>
+          </svg>
+          @einsjulius
+        </a>
+      </div>
+    </section>
+  </main>
+</section>
+
+<!-- ============ VIEW: ABOUT ============ -->
+<section id="view-about" class="view view-about">
+  <main class="subpage-main">
+    <div class="subpage-hero">
+      <h1 data-i18n="about.title">Über uns</h1>
+      <p data-i18n="about.subtitle">Die Idee und der Mensch hinter Scriptino.</p>
+    </div>
+
+    <div class="about-photo-frame">
+      <img src="assets/julius.jpg" alt="Foto von Julius" id="aboutPhoto">
+      <div class="about-photo-placeholder" id="aboutPhotoPlaceholder">
+        <i data-lucide="image"></i>
+        <span>assets/julius.jpg</span>
+      </div>
+    </div>
+
+    <section class="subpage-section">
+      <h2 data-i18n="about.behind.h">Hinter Scriptino</h2>
+      <p data-i18n="about.behind.p1">Hinter Scriptino steckt einsjulius, mit bürgerlichem Namen Julius. Julius ist 19 Jahre alt, Student aus Wien und hat Scriptino mit Hilfe von künstlicher Intelligenz gevibecodet.</p>
+      <p data-i18n="about.behind.p2">Scriptino ist aus der Idee entstanden, einen einfachen und kostenlosen Drehbuch-Editor zu entwickeln, der professionell aussieht, aber trotzdem unkompliziert zu bedienen ist.</p>
+    </section>
+
+    <section class="subpage-section">
+      <h2 data-i18n="contact.about.h">Fragen, Bugs oder Verbesserungsvorschläge?</h2>
+      <p data-i18n="contact.p">Wenn du Fragen, Probleme oder Verbesserungsvorschläge hast, kannst du dich gerne melden.</p>
+      <div class="contact-row">
+        <a class="contact-link" href="mailto:einsjulius@gmail.com"><i data-lucide="mail"></i> einsjulius@gmail.com</a>
+        <a class="contact-link" href="https://instagram.com/einsjulius" target="_blank" rel="noopener">
+          <svg class="ig-icon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <rect x="2" y="2" width="20" height="20" rx="5" ry="5"></rect>
+            <path d="M16 11.37A4 4 0 1 1 12.63 8 4 4 0 0 1 16 11.37z"></path>
+            <line x1="17.5" y1="6.5" x2="17.51" y2="6.5"></line>
+          </svg>
+          @einsjulius
+        </a>
+      </div>
+    </section>
+  </main>
+</section>
+
+<!-- ============ VIEW: EDITOR ============ -->
+<section id="view-editor" class="view view-editor">
+  <header class="editor-topbar" id="editorTopbar">
+    <div class="topbar-left">
+      <button class="icon-btn" id="btnBackToLibrary" data-i18n-title="editor.backTitle" title="Zurück zu Meine Skripte" type="button">
+        <i data-lucide="arrow-left"></i>
+      </button>
+      <div class="topbar-title-wrap">
+        <input id="scriptTitleInput" class="topbar-title-input" type="text" value="Unbenanntes Skript" spellcheck="false">
+        <span id="topbarSaveState" class="topbar-save-state" data-i18n="editor.saved">Gespeichert</span>
+      </div>
+      <span class="tutorial-lock-badge" id="tutorialLockBadge" hidden><i data-lucide="lock"></i> <span data-i18n="tutorial.readonly">Schreibgeschützt</span></span>
+    </div>
+
+    <div class="topbar-toolbar">
+      <div class="element-select-wrap">
+        <select id="elementTypeSelect" class="element-select" aria-label="Element-Typ">
+          <option value="sceneheading" data-i18n="el.sceneheading">Scene Heading</option>
+          <option value="action" data-i18n="el.action">Action</option>
+          <option value="character" data-i18n="el.character">Character</option>
+          <option value="dialogue" data-i18n="el.dialogue">Dialogue</option>
+          <option value="parenthetical" data-i18n="el.parenthetical">Parenthetical</option>
+          <option value="transition" data-i18n="el.transition">Transition</option>
+          <option value="shot" data-i18n="el.shot">Shot</option>
+        </select>
+      </div>
+      <div class="toolbar-divider"></div>
+      <button class="icon-btn" id="btnBold" data-i18n-title="editor.bold" title="Fett (Auswahl)" type="button"><i data-lucide="bold"></i></button>
+      <button class="icon-btn" id="btnItalic" data-i18n-title="editor.italic" title="Kursiv (Auswahl)" type="button"><i data-lucide="italic"></i></button>
+      <div class="toolbar-divider"></div>
+      <button class="icon-btn" id="btnUndo" data-i18n-title="editor.undo" title="Rückgängig" type="button"><i data-lucide="undo-2"></i></button>
+      <button class="icon-btn" id="btnRedo" data-i18n-title="editor.redo" title="Wiederholen" type="button"><i data-lucide="redo-2"></i></button>
+    </div>
+
+    <div class="topbar-right">
+      <button class="icon-btn" id="btnFocusMode" data-i18n-title="editor.focus" title="Fokusmodus" type="button"><i data-lucide="scan"></i></button>
+      <button class="icon-btn" id="btnPrint" data-i18n-title="editor.print" title="Drucken (Strg+P)" type="button"><i data-lucide="printer"></i></button>
+      <div class="export-menu-wrap">
+        <button class="icon-btn" id="btnExportMenu" data-i18n-title="editor.export" title="Exportieren" type="button"><i data-lucide="download"></i></button>
+        <div class="export-menu" id="exportMenu" hidden>
+          <button type="button" data-action="pdf"><i data-lucide="file-output"></i> <span data-i18n="editor.exportPdf">Als PDF exportieren</span></button>
+          <button type="button" data-action="scriptino"><i data-lucide="save"></i> <span data-i18n="editor.exportScriptino">Als .scriptino speichern</span></button>
+        </div>
+      </div>
+      <button class="icon-btn" id="btnEditorSettings" data-i18n-title="editor.scriptSettings" title="Skript-Einstellungen" type="button"><i data-lucide="sliders-horizontal"></i></button>
+    </div>
+  </header>
+
+  <div class="editor-stage" id="editorStage">
+    <div class="pages-measure" id="pagesMeasure" aria-hidden="true"></div>
+    <div class="pages-container" id="pagesContainer"></div>
+  </div>
+
+  <footer class="editor-statusbar" id="editorStatusbar">
+    <div class="statusbar-left">
+      <span id="statsLine">1 Seite · 0 Wörter · ca. 1 Min.</span>
+      <span class="statusbar-dot">·</span>
+      <span id="autosaveLine" data-i18n="editor.savedCheck">✓ Gespeichert</span>
+    </div>
+    <div class="zoom-controls" id="zoomControls">
+      <button class="zoom-btn" id="btnZoomOut" type="button" data-i18n-title="zoom.out" title="Verkleinern" aria-label="Dokument verkleinern">−</button>
+      <button class="zoom-level" id="btnZoomReset" type="button" data-i18n-title="zoom.reset" title="Zoom zurücksetzen (100%)">100%</button>
+      <button class="zoom-btn" id="btnZoomIn" type="button" data-i18n-title="zoom.in" title="Vergrößern" aria-label="Dokument vergrößern">+</button>
+    </div>
+  </footer>
+</section>
+
+<!-- ============ MODAL: SETTINGS ============ -->
+<div class="modal-overlay" id="modalSettings" hidden>
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="settingsTitle">
+    <div class="modal-head">
+      <h3 id="settingsTitle" data-i18n="settings.title">Einstellungen</h3>
+      <button class="icon-btn" id="btnCloseSettings" type="button"><i data-lucide="x"></i></button>
+    </div>
+    <div class="modal-body">
+      <div class="settings-row">
+        <div>
+          <label data-i18n="settings.language">Sprache</label>
+          <p class="settings-hint" data-i18n="settings.languageHint">Wähle Deutsch oder English.</p>
+        </div>
+        <div class="lang-switch lang-switch-settings" id="langSwitchSettings">
+          <button type="button" class="lang-btn" id="btnLangDeSettings" data-lang="de">Deutsch</button>
+          <button type="button" class="lang-btn" id="btnLangEnSettings" data-lang="en">English</button>
+        </div>
+      </div>
+      <div class="settings-row">
+        <div>
+          <label data-i18n="settings.darkMode">Dark Mode</label>
+          <p class="settings-hint" data-i18n="settings.darkModeHint">Dunkle Oberfläche, das Drehbuchblatt bleibt weiß.</p>
+        </div>
+        <label class="switch">
+          <input type="checkbox" id="settingDarkMode">
+          <span class="switch-track"></span>
+        </label>
+      </div>
+      <div class="settings-row">
+        <div>
+          <label data-i18n="settings.titlePage">Titelseite anzeigen</label>
+          <p class="settings-hint" data-i18n="settings.titlePageHint">Fügt beim Export/Druck eine Titelseite hinzu.</p>
+        </div>
+        <label class="switch">
+          <input type="checkbox" id="settingTitlePage">
+          <span class="switch-track"></span>
+        </label>
+      </div>
+      <div class="settings-row">
+        <div>
+          <label data-i18n="settings.pageNumbers">Seitenzahlen</label>
+          <p class="settings-hint" data-i18n="settings.pageNumbersHint">Zeigt Seitenzahlen ab Seite 2 oben rechts.</p>
+        </div>
+        <label class="switch">
+          <input type="checkbox" id="settingPageNumbers">
+          <span class="switch-track"></span>
+        </label>
+      </div>
+      <div class="settings-row">
+        <div>
+          <label data-i18n="settings.autosave">Autosave</label>
+          <p class="settings-hint" data-i18n="settings.autosaveHint">Speichert automatisch während des Schreibens.</p>
+        </div>
+        <label class="switch">
+          <input type="checkbox" id="settingAutosave">
+          <span class="switch-track"></span>
+        </label>
+      </div>
+      <div class="settings-row">
+        <div>
+          <label data-i18n="settings.fontSize">Schriftgröße</label>
+          <p class="settings-hint" data-i18n="settings.fontSizeHint">Größe des Drehbuchtexts.</p>
+        </div>
+        <select id="settingFontSize" class="settings-select">
+          <option value="11" data-i18n="settings.fontSize.small">Klein — 11pt</option>
+          <option value="12" selected data-i18n="settings.fontSize.default">Standard — 12pt</option>
+          <option value="13" data-i18n="settings.fontSize.large">Groß — 13pt</option>
+        </select>
+      </div>
+      <div class="settings-row">
+        <div>
+          <label data-i18n="settings.pageSize">Seitengröße</label>
+          <p class="settings-hint" data-i18n="settings.pageSizeHint">Papierformat für Seite &amp; PDF-Export.</p>
+        </div>
+        <select id="settingPageSize" class="settings-select">
+          <option value="letter" selected>US Letter (8.5 × 11")</option>
+          <option value="a4">A4 (21 × 29,7 cm)</option>
+        </select>
+      </div>
+      <div class="settings-divider"></div>
+      <div class="settings-row settings-danger-row">
+        <div>
+          <label data-i18n="settings.deleteAll">Alle lokalen Daten löschen</label>
+          <p class="settings-hint" data-i18n="settings.deleteAllHint">Entfernt sämtliche gespeicherten Skripte unwiderruflich von diesem Gerät.</p>
+        </div>
+        <button class="btn btn-danger" id="btnDeleteAllData" type="button" data-i18n="settings.delete">Löschen</button>
+      </div>
+      <p class="settings-privacy-note"><i data-lucide="shield-check"></i> <span data-i18n="settings.privacy">Deine Skripte werden ausschließlich auf deinem Gerät gespeichert. Kein Tracking, keine Werbung, keine Analytics.</span></p>
+    </div>
+  </div>
+</div>
+
+<!-- ============ MODAL: SCRIPT SETTINGS ============ -->
+<div class="modal-overlay" id="modalScriptSettings" hidden>
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="scriptSettingsTitle">
+    <div class="modal-head">
+      <h3 id="scriptSettingsTitle" data-i18n="scriptSettings.title">Skript-Einstellungen</h3>
+      <button class="icon-btn" id="btnCloseScriptSettings" type="button"><i data-lucide="x"></i></button>
+    </div>
+    <div class="modal-body">
+      <div class="field">
+        <label for="fieldScriptTitle" data-i18n="scriptSettings.titleField">Titel</label>
+        <input type="text" id="fieldScriptTitle">
+      </div>
+      <div class="field">
+        <label for="fieldScriptAuthor" data-i18n="scriptSettings.author">Autor</label>
+        <input type="text" id="fieldScriptAuthor">
+      </div>
+      <div class="settings-row">
+        <div>
+          <label data-i18n="settings.titlePage">Titelseite anzeigen</label>
+          <p class="settings-hint" data-i18n="scriptSettings.titlePageHint">Nur für dieses Skript.</p>
+        </div>
+        <label class="switch">
+          <input type="checkbox" id="fieldShowTitlePage">
+          <span class="switch-track"></span>
+        </label>
+      </div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn btn-primary" id="btnSaveScriptSettings" type="button" data-i18n="scriptSettings.apply">Übernehmen</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============ MODAL: PDF EXPORT ============ -->
+<div class="modal-overlay" id="modalPdfExport" hidden>
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="pdfExportTitle">
+    <div class="modal-head">
+      <h3 id="pdfExportTitle" data-i18n="pdf.title">PDF exportieren</h3>
+      <button class="icon-btn" id="btnClosePdfExport" type="button"><i data-lucide="x"></i></button>
+    </div>
+    <div class="modal-body">
+      <label class="radio-row">
+        <input type="radio" name="pdfExportMode" id="pdfModeFull" value="full" checked>
+        <span class="radio-dot"></span>
+        <span class="radio-label" data-i18n="pdf.full">Komplettes Skript</span>
+      </label>
+      <label class="radio-row" id="pdfModeCharacterRow">
+        <input type="radio" name="pdfExportMode" id="pdfModeCharacter" value="character">
+        <span class="radio-dot"></span>
+        <span class="radio-label" data-i18n="pdf.actor">Skript für einen Charakter</span>
+      </label>
+
+      <div class="pdf-character-options" id="pdfCharacterOptions" hidden>
+        <div class="field">
+          <label for="pdfCharacterSelect" data-i18n="pdf.selectCharacter">Charakter auswählen</label>
+          <select id="pdfCharacterSelect" class="settings-select pdf-character-select"></select>
+        </div>
+        <div class="field pdf-color-field">
+          <label for="pdfHighlightColor" data-i18n="pdf.color">Markierungsfarbe</label>
+          <input type="color" id="pdfHighlightColor" value="#fff3a0">
+        </div>
+      </div>
+      <p class="pdf-no-characters-hint" id="pdfNoCharactersHint" hidden data-i18n="pdf.noCharacters">Dieses Skript enthält noch keine Charaktere.</p>
+    </div>
+    <div class="modal-foot">
+      <button class="btn btn-subtle" id="btnCancelPdfExport" type="button" data-i18n="common.cancel">Abbrechen</button>
+      <button class="btn btn-primary" id="btnConfirmPdfExport" type="button" data-i18n="editor.exportPdf">PDF exportieren</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============ MODAL: CONFIRM ============ -->
+<div class="modal-overlay" id="modalConfirm" hidden>
+  <div class="modal modal-small" role="alertdialog" aria-modal="true" aria-labelledby="confirmTitle">
+    <div class="modal-body">
+      <h3 id="confirmTitle" class="confirm-title"></h3>
+      <p id="confirmBody" class="confirm-body"></p>
+    </div>
+    <div class="modal-foot">
+      <button class="btn btn-subtle" id="btnConfirmCancel" type="button" data-i18n="common.cancel">Abbrechen</button>
+      <button class="btn btn-danger" id="btnConfirmOk" type="button" data-i18n="common.confirm">Bestätigen</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============ MODAL: RENAME ============ -->
+<div class="modal-overlay" id="modalRename" hidden>
+  <div class="modal modal-small" role="dialog" aria-modal="true" aria-labelledby="renameTitle">
+    <div class="modal-head">
+      <h3 id="renameTitle" data-i18n="rename.title">Skript umbenennen</h3>
+      <button class="icon-btn" id="btnCloseRename" type="button"><i data-lucide="x"></i></button>
+    </div>
+    <div class="modal-body">
+      <div class="field">
+        <label for="renameInput" data-i18n="scriptSettings.titleField">Titel</label>
+        <input type="text" id="renameInput">
+      </div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn btn-primary" id="btnRenameSave" type="button" data-i18n="common.save">Speichern</button>
+    </div>
+  </div>
+</div>
+
+<!-- Hidden file inputs -->
+<input type="file" id="fileImportScript" accept=".scriptino,.txt,application/json,text/plain" hidden>
+<input type="file" id="fileImportBackup" accept=".json,application/json" hidden>
+
+<script src="https://unpkg.com/lucide@latest/dist/umd/lucide.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+<script src="script.js"></script>
+</body>
+</html>
